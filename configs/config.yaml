@@ -1,0 +1,45 @@
+[data]
+puzzle_size = 4 # Size of the puzzle (e.g., 4 for 4x4)
+num_samples = 1000 # Number of puzzle samples to generate
+
+[model]
+hidden_layers = 3 # Number of hidden layers in the model
+input_dim = 16
+hidden_dim = 128
+output_dim = 16
+activation = "relu" # Activation function to use
+dropout_rate = 0.2 # Dropout rate for regularization
+learning_rate = 0.001 # Learning rate for the optimizer
+batch_size = 64 # Batch size for training
+recursive_steps = 5 # Number of recursive steps in the model
+
+[training]
+random_seed = 123 # Random seed for reproducibility
+num_epochs = 100 # Number of training epochs
+num_epochs = 50 # Number of training epochs
+validation_split = 0.2 # Proportion of data to use for validation
+early_stopping = true # Whether to use early stopping
+early_stopping_patience = 5 # Patience for early stopping
+save_model_path = "models/puzzle_solver_model.pth" # Path to save the trained model
+use_gpu = true # Whether to use GPU for training
+gpu_id = 0 # GPU ID to use if multiple GPUs are available
+num_workers = 4 # Number of worker threads for data loading
+pin_memory = true # Whether to use pinned memory for data loading
+mixed_precision = false # Whether to use mixed precision training
+
+[logging]
+log_dir = "logs/" # Directory to save logs
+log_level = "INFO" # Logging level
+save_checkpoints = true # Whether to save model checkpoints
+checkpoint_interval = 5 # Interval (in epochs) to save checkpoints
+wandb_project = "puzzle_solver" # Weights & Biases project name
+wandb_entity = "your_entity" # Weights & Biases entity name
+log_interval = 10 # Interval for logging training progress
+
+
+[evaluation]
+batch_size = 64 # Batch size for evaluation
+recursive_steps = 5 # Number of recursive steps during evaluation
+metrics = ["accuracy", "f1_score"] # Metrics to evaluate the model
+save_evaluation_results = true # Whether to save evaluation results
+evaluation_results_path = "results/evaluation_results.json" # Path to save evaluation results
