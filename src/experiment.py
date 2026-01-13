@@ -77,7 +77,7 @@ class ExperimentConfig:
     # Experiment metadata
     name: str = "bench-trm"
     model_type: str = "trm"  # 'trm' or 'transformer'
-    run_id: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
+    run_id: str = ""  # Will be auto-generated if empty
 
     # Model configuration
     model_dim: int = 128
@@ -113,6 +113,26 @@ class ExperimentConfig:
     wandb_project: str = "bench-trm"
     wandb_entity: Optional[str] = None
     wandb_tags: list = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Generate run_id if not provided."""
+        if not self.run_id:
+            self.run_id = self._generate_run_id()
+
+    def _generate_run_id(self) -> str:
+        """Generate a descriptive run ID with experiment details."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Format: model_type-e<epochs>-d<samples>-dim<dim>-<timestamp>
+        samples_k = self.num_train_samples // 1000
+        run_id = (
+            f"{self.model_type}"
+            f"-e{self.epochs}"
+            f"-d{samples_k}k"
+            f"-dim{self.model_dim}"
+            f"-{timestamp}"
+        )
+        return run_id
 
     def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary."""
