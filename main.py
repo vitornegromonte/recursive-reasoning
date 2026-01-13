@@ -38,6 +38,7 @@ def get_device() -> torch.device:
 
 def run_trm_experiment(
     device: torch.device,
+    puzzle_size: int = 4,
     trm_dim: int = 128,
     num_epochs: int = 20,
     batch_size: int = 64,
@@ -61,6 +62,7 @@ def run_trm_experiment(
 
     Args:
         device: Device to run on.
+        puzzle_size: Size of the Sudoku grid (e.g., 4 for 4x4, 9 for 9x9).
         trm_dim: Latent dimension for TRM.
         num_epochs: Number of training epochs.
         batch_size: Batch size.
@@ -80,7 +82,12 @@ def run_trm_experiment(
         resume_from: Optional checkpoint path to resume from.
     """
     print(f"Using device: {device}")
-    print(f"TRM experiment: dim={trm_dim}, T_train={T_train}, T_eval={T_eval}")
+    print(f"TRM experiment: puzzle={puzzle_size}x{puzzle_size}, dim={trm_dim}, T_train={T_train}, T_eval={T_eval}")
+
+    # Compute puzzle-dependent dimensions
+    num_cells = puzzle_size * puzzle_size
+    num_digits = puzzle_size
+    cell_dim = puzzle_size + 1  # 0 for blank + digits 1..n
 
     # Create experiment config
     config = ExperimentConfig(
@@ -102,17 +109,19 @@ def run_trm_experiment(
         wandb_entity=wandb_entity,
         checkpoint_dir=checkpoint_dir,
         log_dir=log_dir,
-        wandb_tags=["trm", "sudoku"],
+        wandb_tags=["trm", "sudoku", f"{puzzle_size}x{puzzle_size}"],
     )
 
     # Create datasets
     train_dataset = SudokuDataset(
         num_samples=num_train_samples,
         num_blanks=num_blanks_train,
+        n=puzzle_size,
     )
     test_dataset = SudokuDataset(
         num_samples=num_test_samples,
         num_blanks=num_blanks_test,
+        n=puzzle_size,
     )
 
     train_loader = DataLoader(
@@ -130,7 +139,12 @@ def run_trm_experiment(
     )
 
     # Create model
-    model = SudokuTRM(trm_dim=trm_dim)
+    model = SudokuTRM(
+        trm_dim=trm_dim,
+        cell_dim=cell_dim,
+        num_cells=num_cells,
+        num_digits=num_digits,
+    )
     model.to(device)
 
     # Create experiment tracker
@@ -180,6 +194,7 @@ def run_trm_experiment(
 
 def run_transformer_experiment(
     device: torch.device,
+    puzzle_size: int = 4,
     d_model: int = 128,
     depth: int = 6,
     n_heads: int = 4,
@@ -202,6 +217,7 @@ def run_transformer_experiment(
 
     Args:
         device: Device to run on.
+        puzzle_size: Size of the Sudoku grid (e.g., 4 for 4x4, 9 for 9x9).
         d_model: Model dimension.
         depth: Number of Transformer blocks.
         n_heads: Number of attention heads.
@@ -220,7 +236,12 @@ def run_transformer_experiment(
         resume_from: Optional checkpoint path to resume from.
     """
     print(f"Using device: {device}")
-    print(f"Transformer experiment: d_model={d_model}, depth={depth}")
+    print(f"Transformer experiment: puzzle={puzzle_size}x{puzzle_size}, d_model={d_model}, depth={depth}")
+
+    # Compute puzzle-dependent dimensions
+    num_cells = puzzle_size * puzzle_size
+    num_digits = puzzle_size
+    vocab_size = puzzle_size + 1  # 0 for blank + digits 1..n
 
     # Create experiment config
     config = ExperimentConfig(
@@ -241,17 +262,19 @@ def run_transformer_experiment(
         wandb_entity=wandb_entity,
         checkpoint_dir=checkpoint_dir,
         log_dir=log_dir,
-        wandb_tags=["transformer", "sudoku"],
+        wandb_tags=["transformer", "sudoku", f"{puzzle_size}x{puzzle_size}"],
     )
 
     # Create datasets
     train_dataset = SudokuDataset(
         num_samples=num_train_samples,
         num_blanks=num_blanks,
+        n=puzzle_size,
     )
     test_dataset = SudokuDataset(
         num_samples=num_test_samples,
         num_blanks=num_blanks,
+        n=puzzle_size,
     )
 
     train_loader = DataLoader(
@@ -273,6 +296,9 @@ def run_transformer_experiment(
         depth=depth,
         n_heads=n_heads,
         d_ff=d_ff,
+        cell_vocab_size=vocab_size,
+        grid_size=num_cells,
+        num_digits=num_digits,
     ).to(device)
 
     # Create experiment tracker
@@ -342,6 +368,13 @@ def main() -> None:
 
     # Data parameters
     parser.add_argument(
+        "--puzzle-size",
+        type=int,
+        default=4,
+        choices=[4, 9, 16],
+        help="Sudoku puzzle size: 4 (4x4), 9 (9x9), or 16 (16x16) (default: 4)",
+    )
+    parser.add_argument(
         "--num-train",
         type=int,
         default=100_000,
@@ -404,6 +437,7 @@ def main() -> None:
         print("=" * 60)
         run_trm_experiment(
             device=device,
+            puzzle_size=args.puzzle_size,
             trm_dim=args.dim,
             num_epochs=args.epochs,
             batch_size=args.batch_size,
@@ -424,6 +458,7 @@ def main() -> None:
         print("=" * 60)
         run_transformer_experiment(
             device=device,
+            puzzle_size=args.puzzle_size,
             d_model=args.dim,
             num_epochs=args.epochs,
             batch_size=args.batch_size,

@@ -27,6 +27,7 @@ DIM=128
 NUM_TRAIN=100000
 NUM_TEST=10000
 LR=1e-4
+PUZZLE_SIZE=4  # 4 for 4x4, 9 for 9x9, 16 for 16x16
 
 # Directories
 LOG_DIR="logs"
@@ -84,7 +85,8 @@ run_quick() {
         --num-train 1000 \
         --num-test 200 \
         --batch-size 32 \
-        --dim 64
+        --dim 64 \
+        --puzzle-size $PUZZLE_SIZE
 }
 
 # TRM experiments
@@ -99,7 +101,8 @@ run_trm() {
         --num-test $NUM_TEST \
         --batch-size $BATCH_SIZE \
         --dim $DIM \
-        --lr $LR
+        --lr $LR \
+        --puzzle-size $PUZZLE_SIZE
 }
 
 # Transformer baseline experiments
@@ -114,7 +117,8 @@ run_transformer() {
         --num-test $NUM_TEST \
         --batch-size $BATCH_SIZE \
         --dim $DIM \
-        --lr 3e-4  # Transformer uses higher LR
+        --lr 3e-4 \
+        --puzzle-size $PUZZLE_SIZE  # Transformer uses higher LR
 }
 
 # Ablation studies
@@ -130,7 +134,8 @@ run_ablation() {
             --num-test $NUM_TEST \
             --batch-size $BATCH_SIZE \
             --dim $dim \
-            --lr $LR
+            --lr $LR \
+            --puzzle-size $PUZZLE_SIZE
     done
     
     # Data size ablation
@@ -142,7 +147,21 @@ run_ablation() {
             --num-test $NUM_TEST \
             --batch-size $BATCH_SIZE \
             --dim $DIM \
-            --lr $LR
+            --lr $LR \
+            --puzzle-size $PUZZLE_SIZE
+    done
+    
+    # Puzzle size ablation (only 4 and 9 for reasonable runtime)
+    for psize in 4 9; do
+        run_experiment "trm-puzzle-${psize}x${psize}" \
+            --model trm \
+            --epochs $EPOCHS \
+            --num-train $NUM_TRAIN \
+            --num-test $NUM_TEST \
+            --batch-size $BATCH_SIZE \
+            --dim $DIM \
+            --lr $LR \
+            --puzzle-size $psize
     done
 }
 
@@ -157,7 +176,8 @@ run_comparison() {
         --num-test $NUM_TEST \
         --batch-size $BATCH_SIZE \
         --dim $DIM \
-        --lr $LR
+        --lr $LR \
+        --puzzle-size $PUZZLE_SIZE
     
     run_experiment "compare-transformer" \
         --model transformer \
@@ -166,7 +186,8 @@ run_comparison() {
         --num-test $NUM_TEST \
         --batch-size $BATCH_SIZE \
         --dim $DIM \
-        --lr 3e-4
+        --lr 3e-4 \
+        --puzzle-size $PUZZLE_SIZE
 }
 
 # Run all experiments
