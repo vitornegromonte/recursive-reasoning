@@ -2,30 +2,29 @@
 
 import json
 import logging
-import os
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
 
 # Try to import wandb, but make it optional
 try:
-    import wandb
+    import wandb  # type: ignore[import-not-found]
 
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
-    wandb = None  # type: ignore[assignment]
+    wandb = None
 
 
 def get_logger(
     name: str,
     level: int = logging.INFO,
-    log_file: Optional[Path] = None,
+    log_file: Path | None = None,
 ) -> logging.Logger:
     """
     Create and configure a logger.
@@ -111,7 +110,7 @@ class ExperimentConfig:
     # Wandb configuration
     use_wandb: bool = False
     wandb_project: str = "bench-trm"
-    wandb_entity: Optional[str] = None
+    wandb_entity: str | None = None
     wandb_tags: list = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -122,7 +121,7 @@ class ExperimentConfig:
     def _generate_run_id(self) -> str:
         """Generate a descriptive run ID with experiment details."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         # Format: model_type-e<epochs>-d<samples>-dim<dim>-<timestamp>
         samples_k = self.num_train_samples // 1000
         run_id = (
@@ -164,7 +163,7 @@ class ExperimentTracker:
         self,
         config: ExperimentConfig,
         model: nn.Module,
-        resume_from: Optional[Path] = None,
+        resume_from: Path | None = None,
     ):
         """
         Initialize the experiment tracker.
@@ -221,7 +220,7 @@ class ExperimentTracker:
             return
 
         try:
-            self.wandb_run = wandb.init(
+            self.wandb_run = wandb.init(  # type: ignore[union-attr]
                 project=self.config.wandb_project,
                 entity=self.config.wandb_entity,
                 name=self.config.run_id,
@@ -229,8 +228,8 @@ class ExperimentTracker:
                 tags=self.config.wandb_tags,
                 resume="allow",
             )
-            if wandb.run is not None:
-                self.logger.info(f"Wandb initialized: {wandb.run.url}")
+            if wandb.run is not None:  # type: ignore[union-attr]
+                self.logger.info(f"Wandb initialized: {wandb.run.url}")  # type: ignore[union-attr]
         except Exception as e:
             self.logger.warning(f"Failed to initialize wandb: {e}")
             self.config.use_wandb = False
@@ -238,7 +237,7 @@ class ExperimentTracker:
     def log_metrics(
         self,
         metrics: dict[str, float],
-        step: Optional[int] = None,
+        step: int | None = None,
         prefix: str = "",
     ) -> None:
         """
@@ -261,14 +260,14 @@ class ExperimentTracker:
 
         # Log to wandb
         if self.config.use_wandb and self.wandb_run is not None:
-            wandb.log(metrics, step=step)
+            wandb.log(metrics, step=step)  # type: ignore[union-attr]
 
     def log_epoch(
         self,
         epoch: int,
         train_loss: float,
-        val_accuracy: Optional[float] = None,
-        extra_metrics: Optional[dict[str, float]] = None,
+        val_accuracy: float | None = None,
+        extra_metrics: dict[str, float] | None = None,
     ) -> None:
         """
         Log end-of-epoch metrics.
@@ -300,7 +299,7 @@ class ExperimentTracker:
         self.logger.info(f"Epoch {epoch} completed | {metrics_str}")
 
         if self.config.use_wandb and self.wandb_run is not None:
-            wandb.log(metrics, step=self.global_step)
+            wandb.log(metrics, step=self.global_step)  # type: ignore[union-attr]
 
         # Save periodic checkpoint
         if (epoch + 1) % self.config.save_every == 0:
@@ -309,8 +308,8 @@ class ExperimentTracker:
     def save_checkpoint(
         self,
         filename: str,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        extra_state: Optional[dict[str, Any]] = None,
+        optimizer: torch.optim.Optimizer | None = None,
+        extra_state: dict[str, Any] | None = None,
     ) -> Path:
         """
         Save a model checkpoint.
@@ -347,7 +346,7 @@ class ExperimentTracker:
     def load_checkpoint(
         self,
         checkpoint_path: Path,
-        optimizer: Optional[torch.optim.Optimizer] = None,
+        optimizer: torch.optim.Optimizer | None = None,
     ) -> dict[str, Any]:
         """
         Load a model checkpoint.
@@ -387,7 +386,7 @@ class ExperimentTracker:
         self.save_checkpoint("final.pt")
 
         if self.config.use_wandb and self.wandb_run is not None:
-            wandb.finish()
+            wandb.finish()  # type: ignore[union-attr]
 
         self.logger.info(f"Experiment finished. Best metric: {self.best_metric:.4f}")
 

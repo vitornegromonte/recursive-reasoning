@@ -52,8 +52,8 @@ run_experiment() {
     log "Starting experiment: $name"
     log "Arguments: ${args[*]}"
     
-    # Build command
-    local cmd="python main.py ${args[*]}"
+    # Build command (using uv run for proper environment)
+    local cmd="uv run python main.py ${args[*]}"
     
     # Add wandb if enabled
     if [[ $USE_WANDB -eq 1 ]]; then
@@ -186,7 +186,7 @@ main() {
     
     log "Project root: $PROJECT_ROOT"
     log "Experiment: $experiment"
-    log "Device: $(python -c 'import torch; print("cuda" if torch.cuda.is_available() else "cpu")')"
+    log "Device: $(uv run python -c 'import torch; print("cuda" if torch.cuda.is_available() else "cpu")')"
     echo ""
     
     case $experiment in

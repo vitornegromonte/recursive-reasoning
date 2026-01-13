@@ -1,0 +1,39 @@
+# Bench-TRM Configuration Presets
+# ================================
+# Standard Transformer baseline configuration.
+
+data:
+  puzzle_size: 4
+  num_train_samples: 100000
+  num_test_samples: 10000
+  num_blanks_train: 8
+  num_blanks_test: 8
+
+model:
+  type: transformer
+  d_model: 128
+  n_heads: 4
+  d_ff: 256
+  depth: 6
+  dropout: 0.1
+
+training:
+  epochs: 20
+  batch_size: 64
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+
+logging:
+  log_dir: logs
+  checkpoint_dir: checkpoints
+  save_every: 5
+  log_every: 100
+
+wandb:
+  enabled: false
+  project: bench-trm
+  entity: null
+  tags:
+    - transformer
+    - sudoku
+    - baseline

@@ -1,6 +1,5 @@
 """MLP operators for TRM and Transformer models."""
 
-from typing import Optional, Type
 
 import torch
 import torch.nn as nn
@@ -20,7 +19,7 @@ class MLP(nn.Module):
         hidden_dim: int,
         output_dim: int,
         depth: int = 2,
-        activation: Type[nn.Module] = nn.SiLU,
+        activation: type[nn.Module] = nn.SiLU,
         weight_init: str = "xavier",
     ):
         """
@@ -79,7 +78,7 @@ class MLP(nn.Module):
         self,
         a: torch.Tensor,
         b: torch.Tensor,
-        c: Optional[torch.Tensor] = None,
+        c: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Forward pass with flexible input handling.
@@ -118,7 +117,7 @@ class TinyTRMMLP(nn.Module):
     def __init__(
         self,
         dim: int,
-        activation: Type[nn.Module] = nn.SiLU,
+        activation: type[nn.Module] = nn.SiLU,
         weight_init: str = "xavier",
     ):
         """
@@ -156,7 +155,7 @@ class TinyTRMMLP(nn.Module):
         self,
         a: torch.Tensor,
         b: torch.Tensor,
-        c: Optional[torch.Tensor] = None,
+        c: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Apply the TRM operator.
@@ -179,4 +178,3 @@ class TinyTRMMLP(nn.Module):
         x = torch.cat([a, b, c], dim=-1)
         h = self.activation(self.fc1(x))
         return self.fc2(h)
-       

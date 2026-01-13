@@ -1,15 +1,22 @@
 import random
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from typing import Tuple
 
-from .base import BASE_SOLUTION, make_base_solution, permute_digits, permute_rows, permute_cols
+from .base import (
+    BASE_SOLUTION,
+    make_base_solution,
+    permute_cols,
+    permute_digits,
+    permute_rows,
+)
+
 
 def sample_solution(n: int = 4) -> np.ndarray:
     """
     Sample a valid Sudoku solution grid of size n*n.
-    
+
     Args:
         n (int): Size of the Sudoku grid (n x n). Must be a perfect square.
     """
@@ -23,13 +30,13 @@ def sample_solution(n: int = 4) -> np.ndarray:
 def make_puzzle(solution: np.ndarray, num_blanks: int) -> np.ndarray:
     """
     Create a Sudoku puzzle by blanking out `num_blanks` cells from the given solution.
-    
+
     Args:
         solution (np.ndarray): A valid n*n Sudoku solution grid.
         num_blanks (int): The number of cells to blank out (set to 0 to create the puzzle). Must be in [0, n*n].
-        
+
     """
-    
+
     puzzle = solution.copy()
     n = int(solution.shape[0])
     if solution.shape != (n, n):
@@ -51,7 +58,7 @@ def encode_puzzle(puzzle: np.ndarray) -> np.ndarray:
 
     Channel 0 represents blank (0 in the puzzle).
     Channels 1..n represent digits 1..n.
-    
+
     Args:
         puzzle (np.ndarray): An n*n Sudoku puzzle grid with blanks represented as 0.
     Returns:
@@ -74,7 +81,7 @@ def encode_puzzle(puzzle: np.ndarray) -> np.ndarray:
 def encode_solution(solution: np.ndarray) -> np.ndarray:
     """
     Encode an n*n solution into class indices in [0, n-1] with shape (n^2,).
-    
+
     Args:
         solution (np.ndarray): An n*n Sudoku solution grid.
     Returns:
@@ -86,7 +93,7 @@ def encode_solution(solution: np.ndarray) -> np.ndarray:
     return solution.flatten().astype(np.int64) - 1
 
 
-def generate_sudoku_sample(num_blanks: int, n: int = 4) -> Tuple[np.ndarray, np.ndarray]:
+def generate_sudoku_sample(num_blanks: int, n: int = 4) -> tuple[np.ndarray, np.ndarray]:
     """
     Generate a single Sudoku puzzle-solution pair.
     Args:
@@ -111,7 +118,7 @@ class SudokuDataset(Dataset):
     def __len__(self) -> int:
         return self.num_samples
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         x, y = generate_sudoku_sample(self.num_blanks, n=self.n)
         return (
             torch.tensor(x, dtype=torch.float32),

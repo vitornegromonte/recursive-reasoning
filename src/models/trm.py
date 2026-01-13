@@ -1,6 +1,5 @@
 """Tiny Recursive Model (TRM) implementation."""
 
-from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,7 +11,7 @@ def latent_recursion(
     y: torch.Tensor,
     z: torch.Tensor,
     n: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Perform n steps of latent recursion.
 
@@ -54,8 +53,8 @@ class TRM(nn.Module):
         self,
         operator: nn.Module,
         latent_dim: int,
-        embed: Optional[nn.Module] = None,
-        output_head: Optional[nn.Module] = None,
+        embed: nn.Module | None = None,
+        output_head: nn.Module | None = None,
     ):
         """
         Initialize the TRM.
@@ -78,7 +77,7 @@ class TRM(nn.Module):
         self,
         batch_size: int,
         device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Initialize latent states y and z to zeros.
 
@@ -98,7 +97,7 @@ class TRM(nn.Module):
         x: torch.Tensor,
         y: torch.Tensor,
         z: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Perform a single recursion step.
 
@@ -119,7 +118,7 @@ class TRM(nn.Module):
         x: torch.Tensor,
         T: int,
         return_trajectory: bool = False,
-    ) -> torch.Tensor | Tuple[torch.Tensor, List[torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """
         Run T recursive reasoning steps.
 
@@ -140,7 +139,7 @@ class TRM(nn.Module):
 
         y, z = self.init_state(batch_size, device)
 
-        trajectory: List[torch.Tensor] = []
+        trajectory: list[torch.Tensor] = []
 
         for _ in range(T):
             y, z = self.step(x, y, z)

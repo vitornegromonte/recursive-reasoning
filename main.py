@@ -8,21 +8,23 @@ models on the Sudoku task.
 
 import argparse
 from pathlib import Path
-from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader
 
 from src.data import SudokuDataset
-from src.models.trm import SudokuTRM
+from src.experiment import (
+    ExperimentConfig,
+    ExperimentTracker,
+)
 from src.models.transformer import SudokuTransformer
+from src.models.trm import SudokuTRM
 from src.training import (
+    evaluate_transformer,
+    evaluate_trm,
     train_sudoku_trm,
     train_transformer,
-    evaluate_trm,
-    evaluate_transformer,
 )
-from src.experiment import ExperimentConfig, ExperimentTracker, load_model_from_checkpoint
 
 
 def get_device() -> torch.device:
@@ -49,10 +51,10 @@ def run_trm_experiment(
     lr: float = 1e-4,
     use_wandb: bool = False,
     wandb_project: str = "bench-trm",
-    wandb_entity: Optional[str] = None,
+    wandb_entity: str | None = None,
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
-    resume_from: Optional[Path] = None,
+    resume_from: Path | None = None,
 ) -> None:
     """
     Run a complete TRM training and evaluation experiment.
@@ -169,7 +171,8 @@ def run_trm_experiment(
     # Log ablation results to wandb
     if config.use_wandb:
         try:
-            import wandb
+            import wandb  # type: ignore[import-not-found]
+
             wandb.log(ablation_results)
         except ImportError:
             pass
@@ -189,10 +192,10 @@ def run_transformer_experiment(
     lr: float = 3e-4,
     use_wandb: bool = False,
     wandb_project: str = "bench-trm",
-    wandb_entity: Optional[str] = None,
+    wandb_entity: str | None = None,
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
-    resume_from: Optional[Path] = None,
+    resume_from: Path | None = None,
 ) -> None:
     """
     Run a complete Transformer baseline experiment.

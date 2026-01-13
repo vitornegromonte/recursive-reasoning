@@ -1,14 +1,14 @@
 """Neural network models and utilities."""
 
-from .trm import TRM, SudokuTRM, latent_recursion
-from .mlp import MLP, TinyTRMMLP
 from .heads import OutputHead, SudokuEmbedding, SudokuOutputHead
-from .utils import EMA, AverageMeter
+from .mlp import MLP, TinyTRMMLP
 from .transformer import (
-    TransformerBlock,
-    SudokuTransformerEmbedding,
     SudokuTransformer,
+    SudokuTransformerEmbedding,
+    TransformerBlock,
 )
+from .trm import TRM, SudokuTRM, latent_recursion
+from .utils import EMA, AverageMeter
 
 __all__ = [
     # TRM

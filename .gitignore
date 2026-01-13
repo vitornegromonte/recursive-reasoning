@@ -216,3 +216,41 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ===== Project-specific (ML/Deep Learning) =====
+# Experiment outputs
+logs/
+checkpoints/
+outputs/
+results/
+
+# Wandb
+wandb/
+
+# Model artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Data files (if generated locally)
+data/
+datasets/
+
+# ===== IDE/Editor =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===== OS-specific =====
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini

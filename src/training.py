@@ -1,6 +1,5 @@
 """Training and evaluation functions for TRM and Transformer models."""
 
-from pathlib import Path
 from typing import Optional
 
 import torch
@@ -8,13 +7,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.models.trm import latent_recursion, SudokuTRM
 from src.models.transformer import SudokuTransformer
+from src.models.trm import SudokuTRM, latent_recursion
 from src.models.utils import EMA, AverageMeter
 
 # Import experiment tracking (optional)
 try:
-    from src.experiment import ExperimentTracker, ExperimentConfig
+    from src.experiment import ExperimentConfig, ExperimentTracker
     TRACKING_AVAILABLE = True
 except ImportError:
     TRACKING_AVAILABLE = False
@@ -34,7 +33,7 @@ def train_sudoku_trm(
     ema_decay: float = 0.999,
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
-    test_loader: Optional[DataLoader] = None,
+    test_loader: DataLoader | None = None,
     T_eval: int = 32,
 ) -> None:
     """
@@ -227,7 +226,7 @@ def evaluate_trm(
 def train_transformer(
     model: SudokuTransformer,
     train_loader: DataLoader,
-    test_loader: Optional[DataLoader],
+    test_loader: DataLoader | None,
     device: torch.device,
     num_epochs: int = 10,
     lr: float = 3e-4,
