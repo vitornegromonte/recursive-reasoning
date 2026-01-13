@@ -1,5 +1,6 @@
 """Training and evaluation functions for TRM and Transformer models."""
 
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -7,9 +8,18 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models.trm import latent_recursion, SudokuTRM
-from models.transformer import SudokuTransformer
-from models.utils import EMA, AverageMeter
+from src.models.trm import latent_recursion, SudokuTRM
+from src.models.transformer import SudokuTransformer
+from src.models.utils import EMA, AverageMeter
+
+# Import experiment tracking (optional)
+try:
+    from src.experiment import ExperimentTracker, ExperimentConfig
+    TRACKING_AVAILABLE = True
+except ImportError:
+    TRACKING_AVAILABLE = False
+    ExperimentTracker = None  # type: ignore[assignment,misc]
+    ExperimentConfig = None  # type: ignore[assignment,misc]
 
 
 def train_sudoku_trm(
@@ -23,6 +33,9 @@ def train_sudoku_trm(
     weight_decay: float = 1e-4,
     ema_decay: float = 0.999,
     verbose: bool = True,
+    tracker: Optional["ExperimentTracker"] = None,
+    test_loader: Optional[DataLoader] = None,
+    T_eval: int = 32,
 ) -> None:
     """
     Train a Sudoku TRM model with deep supervision.
@@ -44,6 +57,9 @@ def train_sudoku_trm(
         weight_decay: Weight decay for AdamW.
         ema_decay: Decay factor for exponential moving average.
         verbose: Whether to print progress.
+        tracker: Optional experiment tracker for logging and checkpoints.
+        test_loader: Optional test data loader for validation.
+        T_eval: Number of recursion steps for evaluation.
     """
     model.to(device)
     model.train()
@@ -60,8 +76,17 @@ def train_sudoku_trm(
     ema_trm = EMA(model.trm_net, decay=ema_decay)
     ema_head = EMA(model.output_head, decay=ema_decay)
 
-    for epoch in range(epochs):
+    # Determine starting epoch (for resuming)
+    start_epoch = 0
+    if tracker is not None:
+        start_epoch = tracker.current_epoch
+
+    # Determine log frequency
+    log_every = 100 if tracker is None else tracker.config.log_every
+
+    for epoch in range(start_epoch, epochs):
         loss_meter = AverageMeter()
+        batch_count = 0
 
         iterator = tqdm(dataloader, desc=f"Epoch {epoch + 1}") if verbose else dataloader
 
@@ -102,16 +127,51 @@ def train_sudoku_trm(
 
                 loss_meter.update(loss.item())
 
+                # Track step
+                if tracker is not None:
+                    tracker.step()
+
+                    # Log batch metrics periodically
+                    if tracker.global_step % log_every == 0:
+                        tracker.log_metrics(
+                            {"loss": loss.item()},
+                            prefix="train",
+                        )
+
                 # Detach state for next supervision step
                 y = y.detach()
                 z = z.detach()
 
-        if verbose:
-            print(f"Epoch {epoch + 1}: loss = {loss_meter.avg:.4f}")
+            batch_count += 1
 
-    # Apply EMA weights for evaluation
+        # End of epoch
+        val_acc = None
+        if test_loader is not None:
+            # Temporarily apply EMA weights for evaluation
+            ema_trm.apply(model.trm_net)
+            ema_head.apply(model.output_head)
+
+            val_acc = evaluate_trm(model, test_loader, device, T=T_eval)
+
+        if tracker is not None:
+            tracker.log_epoch(
+                epoch=epoch + 1,
+                train_loss=loss_meter.avg,
+                val_accuracy=val_acc,
+            )
+        elif verbose:
+            msg = f"Epoch {epoch + 1}: loss = {loss_meter.avg:.4f}"
+            if val_acc is not None:
+                msg += f" | val_acc = {val_acc:.4f}"
+            print(msg)
+
+    # Apply EMA weights for final model
     ema_trm.apply(model.trm_net)
     ema_head.apply(model.output_head)
+
+    # Finish tracking
+    if tracker is not None:
+        tracker.finish()
 
 
 @torch.no_grad()
@@ -173,6 +233,7 @@ def train_transformer(
     lr: float = 3e-4,
     weight_decay: float = 1e-4,
     verbose: bool = True,
+    tracker: Optional["ExperimentTracker"] = None,
 ) -> None:
     """
     Train a Transformer model on Sudoku.
@@ -188,6 +249,7 @@ def train_transformer(
         lr: Learning rate.
         weight_decay: Weight decay for AdamW.
         verbose: Whether to print progress.
+        tracker: Optional experiment tracker for logging and checkpoints.
     """
     model.to(device)
 
@@ -198,7 +260,15 @@ def train_transformer(
     )
     loss_fn = nn.CrossEntropyLoss()
 
-    for epoch in range(num_epochs):
+    # Determine starting epoch (for resuming)
+    start_epoch = 0
+    if tracker is not None:
+        start_epoch = tracker.current_epoch
+
+    # Determine log frequency
+    log_every = 100 if tracker is None else tracker.config.log_every
+
+    for epoch in range(start_epoch, num_epochs):
         model.train()
         loss_meter = AverageMeter()
 
@@ -220,12 +290,37 @@ def train_transformer(
 
             loss_meter.update(loss.item())
 
-        if verbose:
-            print(f"Epoch {epoch}: loss = {loss_meter.avg:.4f}")
+            # Track step
+            if tracker is not None:
+                tracker.step()
 
-            if test_loader is not None:
-                acc = evaluate_transformer(model, test_loader, device)
-                print(f"Test accuracy: {acc:.4f}")
+                # Log batch metrics periodically
+                if tracker.global_step % log_every == 0:
+                    tracker.log_metrics(
+                        {"loss": loss.item()},
+                        prefix="train",
+                    )
+
+        # End of epoch - evaluate
+        val_acc = None
+        if test_loader is not None:
+            val_acc = evaluate_transformer(model, test_loader, device)
+
+        if tracker is not None:
+            tracker.log_epoch(
+                epoch=epoch + 1,
+                train_loss=loss_meter.avg,
+                val_accuracy=val_acc,
+            )
+        elif verbose:
+            msg = f"Epoch {epoch}: loss = {loss_meter.avg:.4f}"
+            if val_acc is not None:
+                msg += f" | val_acc = {val_acc:.4f}"
+            print(msg)
+
+    # Finish tracking
+    if tracker is not None:
+        tracker.finish()
 
 
 @torch.no_grad()

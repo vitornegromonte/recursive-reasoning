@@ -22,6 +22,12 @@ from src.training import (
     evaluate_trm,
     evaluate_transformer,
 )
+from src.experiment import (
+    ExperimentConfig,
+    ExperimentTracker,
+    get_logger,
+    load_model_from_checkpoint,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -41,5 +47,10 @@ __all__ = [
     "train_transformer",
     "evaluate_trm",
     "evaluate_transformer",
+    # Experiment tracking
+    "ExperimentConfig",
+    "ExperimentTracker",
+    "get_logger",
+    "load_model_from_checkpoint",
 ]
 

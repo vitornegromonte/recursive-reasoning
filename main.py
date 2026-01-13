@@ -7,7 +7,8 @@ models on the Sudoku task.
 """
 
 import argparse
-from typing import Literal
+from pathlib import Path
+from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -21,6 +22,7 @@ from src.training import (
     evaluate_trm,
     evaluate_transformer,
 )
+from src.experiment import ExperimentConfig, ExperimentTracker, load_model_from_checkpoint
 
 
 def get_device() -> torch.device:
@@ -45,6 +47,12 @@ def run_trm_experiment(
     T_eval: int = 32,
     N_SUP: int = 16,
     lr: float = 1e-4,
+    use_wandb: bool = False,
+    wandb_project: str = "bench-trm",
+    wandb_entity: Optional[str] = None,
+    checkpoint_dir: str = "checkpoints",
+    log_dir: str = "logs",
+    resume_from: Optional[Path] = None,
 ) -> None:
     """
     Run a complete TRM training and evaluation experiment.
@@ -62,9 +70,38 @@ def run_trm_experiment(
         T_eval: Recursion depth during evaluation.
         N_SUP: Number of supervision points per batch.
         lr: Learning rate.
+        use_wandb: Whether to use Weights & Biases logging.
+        wandb_project: Wandb project name.
+        wandb_entity: Wandb entity/team name.
+        checkpoint_dir: Directory for saving checkpoints.
+        log_dir: Directory for saving logs.
+        resume_from: Optional checkpoint path to resume from.
     """
     print(f"Using device: {device}")
     print(f"TRM experiment: dim={trm_dim}, T_train={T_train}, T_eval={T_eval}")
+
+    # Create experiment config
+    config = ExperimentConfig(
+        name="sudoku-trm",
+        model_type="trm",
+        model_dim=trm_dim,
+        epochs=num_epochs,
+        batch_size=batch_size,
+        learning_rate=lr,
+        T_train=T_train,
+        T_eval=T_eval,
+        N_SUP=N_SUP,
+        num_blanks_train=num_blanks_train,
+        num_blanks_test=num_blanks_test,
+        num_train_samples=num_train_samples,
+        num_test_samples=num_test_samples,
+        use_wandb=use_wandb,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        checkpoint_dir=checkpoint_dir,
+        log_dir=log_dir,
+        wandb_tags=["trm", "sudoku"],
+    )
 
     # Create datasets
     train_dataset = SudokuDataset(
@@ -94,6 +131,13 @@ def run_trm_experiment(
     model = SudokuTRM(trm_dim=trm_dim)
     model.to(device)
 
+    # Create experiment tracker
+    tracker = ExperimentTracker(
+        config=config,
+        model=model,
+        resume_from=resume_from,
+    )
+
     # Training
     print("Starting TRM training...")
     train_sudoku_trm(
@@ -104,20 +148,14 @@ def run_trm_experiment(
         T=T_train,
         N_SUP=N_SUP,
         lr=lr,
+        tracker=tracker,
+        test_loader=test_loader,
+        T_eval=T_eval,
     )
-
-    # Evaluation
-    print("\nEvaluating...")
-    acc = evaluate_trm(
-        model=model,
-        dataloader=test_loader,
-        device=device,
-        T=T_eval,
-    )
-    print(f"Test accuracy (num_blanks={num_blanks_test}, T={T_eval}): {acc:.4f}")
 
     # Recursion depth ablation
     print("\nRecursion depth ablation:")
+    ablation_results = {}
     for T in [1, 2, 4, 8, 16, 32]:
         acc_T = evaluate_trm(
             model=model,
@@ -125,7 +163,16 @@ def run_trm_experiment(
             device=device,
             T=T,
         )
+        ablation_results[f"ablation/T_{T}"] = acc_T
         print(f"  T={T:2d} → acc={acc_T:.4f}")
+
+    # Log ablation results to wandb
+    if config.use_wandb:
+        try:
+            import wandb
+            wandb.log(ablation_results)
+        except ImportError:
+            pass
 
 
 def run_transformer_experiment(
@@ -140,6 +187,12 @@ def run_transformer_experiment(
     num_train_samples: int = 100_000,
     num_test_samples: int = 10_000,
     lr: float = 3e-4,
+    use_wandb: bool = False,
+    wandb_project: str = "bench-trm",
+    wandb_entity: Optional[str] = None,
+    checkpoint_dir: str = "checkpoints",
+    log_dir: str = "logs",
+    resume_from: Optional[Path] = None,
 ) -> None:
     """
     Run a complete Transformer baseline experiment.
@@ -156,9 +209,37 @@ def run_transformer_experiment(
         num_train_samples: Number of training samples.
         num_test_samples: Number of test samples.
         lr: Learning rate.
+        use_wandb: Whether to use Weights & Biases logging.
+        wandb_project: Wandb project name.
+        wandb_entity: Wandb entity/team name.
+        checkpoint_dir: Directory for saving checkpoints.
+        log_dir: Directory for saving logs.
+        resume_from: Optional checkpoint path to resume from.
     """
     print(f"Using device: {device}")
     print(f"Transformer experiment: d_model={d_model}, depth={depth}")
+
+    # Create experiment config
+    config = ExperimentConfig(
+        name="sudoku-transformer",
+        model_type="transformer",
+        model_dim=d_model,
+        depth=depth,
+        n_heads=n_heads,
+        epochs=num_epochs,
+        batch_size=batch_size,
+        learning_rate=lr,
+        num_blanks_train=num_blanks,
+        num_blanks_test=num_blanks,
+        num_train_samples=num_train_samples,
+        num_test_samples=num_test_samples,
+        use_wandb=use_wandb,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        checkpoint_dir=checkpoint_dir,
+        log_dir=log_dir,
+        wandb_tags=["transformer", "sudoku"],
+    )
 
     # Create datasets
     train_dataset = SudokuDataset(
@@ -191,6 +272,13 @@ def run_transformer_experiment(
         d_ff=d_ff,
     ).to(device)
 
+    # Create experiment tracker
+    tracker = ExperimentTracker(
+        config=config,
+        model=model,
+        resume_from=resume_from,
+    )
+
     # Training
     print("Starting Transformer training...")
     train_transformer(
@@ -200,6 +288,7 @@ def run_transformer_experiment(
         device=device,
         num_epochs=num_epochs,
         lr=lr,
+        tracker=tracker,
     )
 
     # Final evaluation
@@ -212,6 +301,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Bench-TRM: Training and evaluation for recursive models"
     )
+
+    # Model selection
     parser.add_argument(
         "--model",
         type=str,
@@ -219,6 +310,8 @@ def main() -> None:
         default="trm",
         help="Model type to train (default: trm)",
     )
+
+    # Training parameters
     parser.add_argument(
         "--epochs",
         type=int,
@@ -243,6 +336,8 @@ def main() -> None:
         default=128,
         help="Model dimension (default: 128)",
     )
+
+    # Data parameters
     parser.add_argument(
         "--num-train",
         type=int,
@@ -256,12 +351,54 @@ def main() -> None:
         help="Number of test samples (default: 10000)",
     )
 
+    # Logging and tracking
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="bench-trm",
+        help="Wandb project name (default: bench-trm)",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=None,
+        help="Wandb entity/team name",
+    )
+
+    # Checkpointing
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="checkpoints",
+        help="Directory for saving checkpoints (default: checkpoints)",
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default="logs",
+        help="Directory for saving logs (default: logs)",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume training from",
+    )
+
     args = parser.parse_args()
 
     device = get_device()
+    resume_from = Path(args.resume) if args.resume else None
 
     if args.model in ("trm", "both"):
-        print("\nTRM EXPERIMENT\n")
+        print("=" * 60)
+        print("TRM EXPERIMENT")
+        print("=" * 60)
         run_trm_experiment(
             device=device,
             trm_dim=args.dim,
@@ -270,10 +407,18 @@ def main() -> None:
             lr=args.lr,
             num_train_samples=args.num_train,
             num_test_samples=args.num_test,
+            use_wandb=args.wandb,
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir,
+            resume_from=resume_from,
         )
 
     if args.model in ("transformer", "both"):
-        print("\nTRANSFORMER EXPERIMENT\n")
+        print("\n" + "=" * 60)
+        print("TRANSFORMER EXPERIMENT")
+        print("=" * 60)
         run_transformer_experiment(
             device=device,
             d_model=args.dim,
@@ -282,6 +427,12 @@ def main() -> None:
             lr=args.lr * 3,  # Transformer typically uses higher LR
             num_train_samples=args.num_train,
             num_test_samples=args.num_test,
+            use_wandb=args.wandb,
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir,
+            resume_from=resume_from,
         )
 
 

@@ -1,0 +1,31 @@
+{
+  "name": "sudoku-trm",
+  "model_type": "trm",
+  "run_id": "20260113_155258",
+  "model_dim": 128,
+  "depth": 6,
+  "n_heads": 4,
+  "epochs": 1,
+  "batch_size": 16,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.0001,
+  "T_train": 8,
+  "T_eval": 32,
+  "N_SUP": 16,
+  "ema_decay": 0.999,
+  "num_blanks_train": 6,
+  "num_blanks_test": 8,
+  "num_train_samples": 500,
+  "num_test_samples": 100,
+  "log_dir": "logs",
+  "checkpoint_dir": "checkpoints",
+  "save_every": 5,
+  "log_every": 100,
+  "use_wandb": false,
+  "wandb_project": "bench-trm",
+  "wandb_entity": null,
+  "wandb_tags": [
+    "trm",
+    "sudoku"
+  ]
+}

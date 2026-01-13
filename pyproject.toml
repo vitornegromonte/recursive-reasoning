@@ -41,6 +41,12 @@ notebook = [
     "ipykernel>=6.0.0",
     "matplotlib>=3.7.0",
 ]
+tracking = [
+    "wandb>=0.15.0",
+]
+all = [
+    "bench-trm[dev,notebook,tracking]",
+]
 
 [project.scripts]
 bench-trm = "main:main"
