@@ -7,9 +7,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .models.trm import latent_recursion, SudokuTRM
-from .models.transformer import SudokuTransformer
-from .models.utils import EMA, AverageMeter
+from models.trm import latent_recursion, SudokuTRM
+from models.transformer import SudokuTransformer
+from models.utils import EMA, AverageMeter
 
 
 def train_sudoku_trm(

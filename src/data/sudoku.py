@@ -111,7 +111,7 @@ class SudokuDataset(Dataset):
     def __len__(self) -> int:
         return self.num_samples
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
         x, y = generate_sudoku_sample(self.num_blanks, n=self.n)
         return (
             torch.tensor(x, dtype=torch.float32),
