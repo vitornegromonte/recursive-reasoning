@@ -22,7 +22,7 @@ except ImportError:
 
 
 def train_sudoku_trm(
-    model: SudokuTRM,
+    model: SudokuTRM | nn.DataParallel[SudokuTRM],
     dataloader: DataLoader,
     device: torch.device,
     epochs: int = 1,
@@ -45,8 +45,10 @@ def train_sudoku_trm(
     3. Compute loss and backpropagate
     4. Repeat N_SUP times before optimizer step
 
+    Supports DataParallel wrapped models for multi-GPU training.
+
     Args:
-        model: The SudokuTRM model to train.
+        model: The SudokuTRM model to train (can be DataParallel wrapped).
         dataloader: Training data loader.
         device: Device to train on.
         epochs: Number of training epochs.
@@ -60,20 +62,26 @@ def train_sudoku_trm(
         test_loader: Optional test data loader for validation.
         T_eval: Number of recursion steps for evaluation.
     """
+    # Get the underlying model for accessing submodules
+    if isinstance(model, nn.DataParallel):
+        base_model: SudokuTRM = model.module  # type: ignore[assignment]
+    else:
+        base_model = model
+
     model.to(device)
     model.train()
 
     params = (
-        list(model.embed.parameters())
-        + list(model.trm_net.parameters())
-        + list(model.output_head.parameters())
+        list(base_model.embed.parameters())
+        + list(base_model.trm_net.parameters())
+        + list(base_model.output_head.parameters())
     )
 
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
     loss_fn = nn.CrossEntropyLoss()
 
-    ema_trm = EMA(model.trm_net, decay=ema_decay)
-    ema_head = EMA(model.output_head, decay=ema_decay)
+    ema_trm = EMA(base_model.trm_net, decay=ema_decay)
+    ema_head = EMA(base_model.output_head, decay=ema_decay)
 
     # Determine starting epoch (for resuming)
     start_epoch = 0
@@ -97,7 +105,7 @@ def train_sudoku_trm(
 
             # Embed input once (no gradients needed for embedding)
             with torch.no_grad():
-                x = model.embed(x_raw)
+                x = base_model.embed(x_raw)
 
             # Initialize latent states
             y = torch.zeros(batch_size, x.size(-1), device=device)
@@ -106,14 +114,14 @@ def train_sudoku_trm(
             for _ in range(N_SUP):
                 # Run T-1 steps without gradients
                 with torch.no_grad():
-                    y, z = latent_recursion(model.trm_net, x, y, z, T - 1)
+                    y, z = latent_recursion(base_model.trm_net, x, y, z, T - 1)
 
                 # Final step with gradients
                 optimizer.zero_grad()
-                y, z = latent_recursion(model.trm_net, x, y, z, 1)
+                y, z = latent_recursion(base_model.trm_net, x, y, z, 1)
 
                 # Compute loss
-                logits = model.output_head(y)
+                logits = base_model.output_head(y)
                 loss = loss_fn(logits.view(-1, logits.size(-1)), y_target.view(-1))
 
                 # Backpropagate
@@ -121,8 +129,8 @@ def train_sudoku_trm(
                 optimizer.step()
 
                 # Update EMA
-                ema_trm.update(model.trm_net)
-                ema_head.update(model.output_head)
+                ema_trm.update(base_model.trm_net)
+                ema_head.update(base_model.output_head)
 
                 loss_meter.update(loss.item())
 
@@ -147,10 +155,10 @@ def train_sudoku_trm(
         val_acc = None
         if test_loader is not None:
             # Temporarily apply EMA weights for evaluation
-            ema_trm.apply(model.trm_net)
-            ema_head.apply(model.output_head)
+            ema_trm.apply(base_model.trm_net)
+            ema_head.apply(base_model.output_head)
 
-            val_acc = evaluate_trm(model, test_loader, device, T=T_eval)
+            val_acc = evaluate_trm(base_model, test_loader, device, T=T_eval)
 
         if tracker is not None:
             tracker.log_epoch(
@@ -165,8 +173,8 @@ def train_sudoku_trm(
             print(msg)
 
     # Apply EMA weights for final model
-    ema_trm.apply(model.trm_net)
-    ema_head.apply(model.output_head)
+    ema_trm.apply(base_model.trm_net)
+    ema_head.apply(base_model.output_head)
 
     # Finish tracking
     if tracker is not None:
@@ -224,7 +232,7 @@ def evaluate_trm(
 
 
 def train_transformer(
-    model: SudokuTransformer,
+    model: SudokuTransformer | nn.DataParallel[SudokuTransformer],
     train_loader: DataLoader,
     test_loader: DataLoader | None,
     device: torch.device,
@@ -238,9 +246,10 @@ def train_transformer(
     Train a Transformer model on Sudoku.
 
     Standard supervised training with cross-entropy loss.
+    Supports DataParallel wrapped models for multi-GPU training.
 
     Args:
-        model: The SudokuTransformer model to train.
+        model: The SudokuTransformer model to train (can be DataParallel wrapped).
         train_loader: Training data loader.
         test_loader: Optional test data loader for evaluation.
         device: Device to train on.
@@ -250,10 +259,16 @@ def train_transformer(
         verbose: Whether to print progress.
         tracker: Optional experiment tracker for logging and checkpoints.
     """
+    # Get the underlying model for accessing parameters
+    if isinstance(model, nn.DataParallel):
+        base_model: SudokuTransformer = model.module  # type: ignore[assignment]
+    else:
+        base_model = model
+
     model.to(device)
 
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        base_model.parameters(),
         lr=lr,
         weight_decay=weight_decay,
     )
@@ -303,7 +318,7 @@ def train_transformer(
         # End of epoch - evaluate
         val_acc = None
         if test_loader is not None:
-            val_acc = evaluate_transformer(model, test_loader, device)
+            val_acc = evaluate_transformer(base_model, test_loader, device)
 
         if tracker is not None:
             tracker.log_epoch(

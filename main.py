@@ -3,16 +3,26 @@
 Main entry point for Bench-TRM experiments.
 
 Provides training and evaluation pipelines for both TRM and Transformer
-models on the Sudoku task.
+models on the Sudoku task. Supports multi-GPU training via DataParallel.
 """
 
 import argparse
 from pathlib import Path
+from typing import cast
 
-import torch
 from torch.utils.data import DataLoader
 
 from src.data import SudokuDataset
+from src.distributed import (
+    DeviceInfo,
+    get_device_info,
+    get_effective_batch_size,
+    optimize_dataloader_workers,
+    print_device_summary,
+    scale_learning_rate,
+    unwrap_model,
+    wrap_model_for_multi_gpu,
+)
 from src.experiment import (
     ExperimentConfig,
     ExperimentTracker,
@@ -27,17 +37,8 @@ from src.training import (
 )
 
 
-def get_device() -> torch.device:
-    """Get the best available device."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
 def run_trm_experiment(
-    device: torch.device,
+    device_info: DeviceInfo,
     puzzle_size: int = 4,
     trm_dim: int = 128,
     num_epochs: int = 20,
@@ -50,6 +51,8 @@ def run_trm_experiment(
     T_eval: int = 32,
     N_SUP: int = 16,
     lr: float = 1e-4,
+    scale_lr: bool = True,
+    num_workers: int = 0,
     use_wandb: bool = False,
     wandb_project: str = "bench-trm",
     wandb_entity: str | None = None,
@@ -60,12 +63,14 @@ def run_trm_experiment(
     """
     Run a complete TRM training and evaluation experiment.
 
+    Supports multi-GPU training via DataParallel when multiple GPUs are available.
+
     Args:
-        device: Device to run on.
+        device_info: Device configuration from get_device_info().
         puzzle_size: Size of the Sudoku grid (e.g., 4 for 4x4, 9 for 9x9).
         trm_dim: Latent dimension for TRM.
         num_epochs: Number of training epochs.
-        batch_size: Batch size.
+        batch_size: Batch size per GPU (will be scaled for multi-GPU).
         num_blanks_train: Number of blank cells in training puzzles.
         num_blanks_test: Number of blank cells in test puzzles.
         num_train_samples: Number of training samples.
@@ -73,7 +78,9 @@ def run_trm_experiment(
         T_train: Recursion depth during training.
         T_eval: Recursion depth during evaluation.
         N_SUP: Number of supervision points per batch.
-        lr: Learning rate.
+        lr: Base learning rate (will be scaled for multi-GPU if scale_lr=True).
+        scale_lr: Whether to scale LR with number of GPUs (linear scaling rule).
+        num_workers: Number of dataloader workers (0 for auto).
         use_wandb: Whether to use Weights & Biases logging.
         wandb_project: Wandb project name.
         wandb_entity: Wandb entity/team name.
@@ -81,8 +88,15 @@ def run_trm_experiment(
         log_dir: Directory for saving logs.
         resume_from: Optional checkpoint path to resume from.
     """
-    print(f"Using device: {device}")
+    device = device_info.device
+    effective_batch_size = get_effective_batch_size(batch_size, device_info)
+    effective_lr = scale_learning_rate(lr, device_info, scale_lr)
+    num_workers = optimize_dataloader_workers(num_workers, device_info)
+
     print(f"TRM experiment: puzzle={puzzle_size}x{puzzle_size}, dim={trm_dim}, T_train={T_train}, T_eval={T_eval}")
+    print(f"Batch size: {effective_batch_size} (per-GPU: {batch_size})")
+    print(f"Learning rate: {effective_lr:.2e}" + (f" (scaled from {lr:.2e})" if effective_lr != lr else ""))
+    print(f"DataLoader workers: {num_workers}")
 
     # Compute puzzle-dependent dimensions
     num_cells = puzzle_size * puzzle_size
@@ -126,31 +140,33 @@ def run_trm_experiment(
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=effective_batch_size,
         shuffle=True,
         drop_last=True,
-        num_workers=0,
+        num_workers=num_workers,
+        pin_memory=device_info.device.type == "cuda",
     )
     test_loader = DataLoader(
         test_dataset,
-        batch_size=batch_size,
+        batch_size=effective_batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=num_workers,
+        pin_memory=device_info.device.type == "cuda",
     )
 
-    # Create model
+    # Create model (with multi-GPU support)
     model = SudokuTRM(
         trm_dim=trm_dim,
         cell_dim=cell_dim,
         num_cells=num_cells,
         num_digits=num_digits,
     )
-    model.to(device)
+    model = wrap_model_for_multi_gpu(model, device_info)
 
-    # Create experiment tracker
+    # Create experiment tracker (use unwrapped model for checkpointing)
     tracker = ExperimentTracker(
         config=config,
-        model=model,
+        model=unwrap_model(model),
         resume_from=resume_from,
     )
 
@@ -163,18 +179,21 @@ def run_trm_experiment(
         epochs=num_epochs,
         T=T_train,
         N_SUP=N_SUP,
-        lr=lr,
+        lr=effective_lr,
         tracker=tracker,
         test_loader=test_loader,
         T_eval=T_eval,
     )
+
+    # For evaluation, use unwrapped model
+    eval_model = cast(SudokuTRM, unwrap_model(model))
 
     # Recursion depth ablation
     print("\nRecursion depth ablation:")
     ablation_results = {}
     for T in [1, 2, 4, 8, 16, 32]:
         acc_T = evaluate_trm(
-            model=model,
+            model=eval_model,
             dataloader=test_loader,
             device=device,
             T=T,
@@ -193,7 +212,7 @@ def run_trm_experiment(
 
 
 def run_transformer_experiment(
-    device: torch.device,
+    device_info: DeviceInfo,
     puzzle_size: int = 4,
     d_model: int = 128,
     depth: int = 6,
@@ -205,6 +224,8 @@ def run_transformer_experiment(
     num_train_samples: int = 100_000,
     num_test_samples: int = 10_000,
     lr: float = 3e-4,
+    scale_lr: bool = True,
+    num_workers: int = 0,
     use_wandb: bool = False,
     wandb_project: str = "bench-trm",
     wandb_entity: str | None = None,
@@ -215,19 +236,23 @@ def run_transformer_experiment(
     """
     Run a complete Transformer baseline experiment.
 
+    Supports multi-GPU training via DataParallel when multiple GPUs are available.
+
     Args:
-        device: Device to run on.
+        device_info: Device configuration from get_device_info().
         puzzle_size: Size of the Sudoku grid (e.g., 4 for 4x4, 9 for 9x9).
         d_model: Model dimension.
         depth: Number of Transformer blocks.
         n_heads: Number of attention heads.
         d_ff: Feedforward hidden dimension.
         num_epochs: Number of training epochs.
-        batch_size: Batch size.
+        batch_size: Batch size per GPU (will be scaled for multi-GPU).
         num_blanks: Number of blank cells in puzzles.
         num_train_samples: Number of training samples.
         num_test_samples: Number of test samples.
-        lr: Learning rate.
+        lr: Base learning rate (will be scaled for multi-GPU if scale_lr=True).
+        scale_lr: Whether to scale LR with number of GPUs (linear scaling rule).
+        num_workers: Number of dataloader workers (0 for auto).
         use_wandb: Whether to use Weights & Biases logging.
         wandb_project: Wandb project name.
         wandb_entity: Wandb entity/team name.
@@ -235,8 +260,15 @@ def run_transformer_experiment(
         log_dir: Directory for saving logs.
         resume_from: Optional checkpoint path to resume from.
     """
-    print(f"Using device: {device}")
+    device = device_info.device
+    effective_batch_size = get_effective_batch_size(batch_size, device_info)
+    effective_lr = scale_learning_rate(lr, device_info, scale_lr)
+    num_workers = optimize_dataloader_workers(num_workers, device_info)
+
     print(f"Transformer experiment: puzzle={puzzle_size}x{puzzle_size}, d_model={d_model}, depth={depth}")
+    print(f"Batch size: {effective_batch_size} (per-GPU: {batch_size})")
+    print(f"Learning rate: {effective_lr:.2e}" + (f" (scaled from {lr:.2e})" if effective_lr != lr else ""))
+    print(f"DataLoader workers: {num_workers}")
 
     # Compute puzzle-dependent dimensions
     num_cells = puzzle_size * puzzle_size
@@ -279,18 +311,20 @@ def run_transformer_experiment(
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=effective_batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=num_workers,
+        pin_memory=device_info.device.type == "cuda",
     )
     test_loader = DataLoader(
         test_dataset,
-        batch_size=batch_size,
+        batch_size=effective_batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=num_workers,
+        pin_memory=device_info.device.type == "cuda",
     )
 
-    # Create model
+    # Create model (with multi-GPU support)
     model = SudokuTransformer(
         d_model=d_model,
         depth=depth,
@@ -299,12 +333,13 @@ def run_transformer_experiment(
         cell_vocab_size=vocab_size,
         grid_size=num_cells,
         num_digits=num_digits,
-    ).to(device)
+    )
+    model = wrap_model_for_multi_gpu(model, device_info)
 
-    # Create experiment tracker
+    # Create experiment tracker (use unwrapped model for checkpointing)
     tracker = ExperimentTracker(
         config=config,
-        model=model,
+        model=unwrap_model(model),
         resume_from=resume_from,
     )
 
@@ -316,12 +351,13 @@ def run_transformer_experiment(
         test_loader=test_loader,
         device=device,
         num_epochs=num_epochs,
-        lr=lr,
+        lr=effective_lr,
         tracker=tracker,
     )
 
-    # Final evaluation
-    acc = evaluate_transformer(model, test_loader, device)
+    # Final evaluation (use unwrapped model)
+    eval_model = cast(SudokuTransformer, unwrap_model(model))
+    acc = evaluate_transformer(eval_model, test_loader, device)
     print(f"\nFinal test accuracy: {acc:.4f}")
 
 
@@ -387,6 +423,19 @@ def main() -> None:
         help="Number of test samples (default: 10000)",
     )
 
+    # Multi-GPU settings
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Number of dataloader workers (0 for auto-detect, default: 0)",
+    )
+    parser.add_argument(
+        "--no-scale-lr",
+        action="store_true",
+        help="Disable automatic LR scaling for multi-GPU (default: scale LR)",
+    )
+
     # Logging and tracking
     parser.add_argument(
         "--wandb",
@@ -428,20 +477,26 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    device = get_device()
+    # Get device info and print summary
+    device_info = get_device_info()
+    print_device_summary(device_info)
+
     resume_from = Path(args.resume) if args.resume else None
+    scale_lr = not args.no_scale_lr
 
     if args.model in ("trm", "both"):
         print("=" * 60)
         print("TRM EXPERIMENT")
         print("=" * 60)
         run_trm_experiment(
-            device=device,
+            device_info=device_info,
             puzzle_size=args.puzzle_size,
             trm_dim=args.dim,
             num_epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr,
+            scale_lr=scale_lr,
+            num_workers=args.num_workers,
             num_train_samples=args.num_train,
             num_test_samples=args.num_test,
             use_wandb=args.wandb,
@@ -457,12 +512,14 @@ def main() -> None:
         print("TRANSFORMER EXPERIMENT")
         print("=" * 60)
         run_transformer_experiment(
-            device=device,
+            device_info=device_info,
             puzzle_size=args.puzzle_size,
             d_model=args.dim,
             num_epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr * 3,  # Transformer typically uses higher LR
+            scale_lr=scale_lr,
+            num_workers=args.num_workers,
             num_train_samples=args.num_train,
             num_test_samples=args.num_test,
             use_wandb=args.wandb,

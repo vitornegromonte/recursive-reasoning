@@ -29,6 +29,10 @@ NUM_TEST=10000
 LR=1e-4
 PUZZLE_SIZE=4  # 4 for 4x4, 9 for 9x9, 16 for 16x16
 
+# Multi-GPU settings
+NUM_WORKERS=0  # 0 for auto-detect
+SCALE_LR=1     # 1 to enable LR scaling, 0 to disable
+
 # Directories
 LOG_DIR="logs"
 CHECKPOINT_DIR="checkpoints"
@@ -64,6 +68,10 @@ run_experiment() {
     
     # Add directories
     cmd="$cmd --log-dir $LOG_DIR --checkpoint-dir $CHECKPOINT_DIR"
+    
+    # Add multi-GPU settings
+    cmd="$cmd --num-workers $NUM_WORKERS"
+    [[ $SCALE_LR -eq 0 ]] && cmd="$cmd --no-scale-lr"
     
     log "Running: $cmd"
     eval "$cmd"
