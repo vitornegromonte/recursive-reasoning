@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for Bench-TRM experiments.
+Main entry point for Recursive-Reasoning experiments.
 
 Provides training and evaluation pipelines for both TRM and Transformer
 models on the Sudoku task. Supports multi-GPU training via DataParallel.
@@ -57,7 +57,7 @@ def run_trm_experiment(
     scale_lr: bool = True,
     num_workers: int = 0,
     use_wandb: bool = False,
-    wandb_project: str = "bench-trm",
+    wandb_project: str = "recursive-reasoning",
     wandb_entity: str | None = None,
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
@@ -230,7 +230,7 @@ def run_transformer_experiment(
     scale_lr: bool = True,
     num_workers: int = 0,
     use_wandb: bool = False,
-    wandb_project: str = "bench-trm",
+    wandb_project: str = "recursive-reasoning",
     wandb_entity: str | None = None,
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
@@ -379,7 +379,7 @@ def run_lstm_experiment(
     scale_lr: bool = True,
     num_workers: int = 0,
     use_wandb: bool = False,
-    wandb_project: str = "bench-trm",
+    wandb_project: str = "recursive-reasoning",
     wandb_entity: str | None = None,
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
@@ -513,7 +513,7 @@ def run_lstm_experiment(
 def main() -> None:
     """Main entry point with CLI argument parsing."""
     parser = argparse.ArgumentParser(
-        description="Bench-TRM: Training and evaluation for recursive models"
+        description="Recursive-Reasoning: Training and evaluation for recursive models"
     )
 
     # Model selection
@@ -594,8 +594,8 @@ def main() -> None:
     parser.add_argument(
         "--wandb-project",
         type=str,
-        default="bench-trm",
-        help="Wandb project name (default: bench-trm)",
+        default="recursive-reasoning",
+        help="Wandb project name (default: recursive-reasoning)",
     )
     parser.add_argument(
         "--wandb-entity",

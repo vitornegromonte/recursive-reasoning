@@ -1,1 +1,1 @@
-"""Tests for the bench-trm package."""
+"""Tests for the recursive-reasoning package."""

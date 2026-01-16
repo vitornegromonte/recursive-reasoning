@@ -1,5 +1,5 @@
 """
-Bench-TRM: Benchmark for Tiny Recursive Models.
+Recursive-Reasoning: Benchmark for Tiny Recursive Models.
 
 A framework for training and evaluating recursive neural networks
 on combinatorial reasoning tasks like Sudoku.

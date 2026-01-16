@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bench-TRM Experiment Runner
+# Recursive-Reasoning Experiment Runner
 # Usage: ./scripts/run_experiments.sh [experiment_name]
 #
 # Examples:
@@ -38,7 +38,7 @@ CHECKPOINT_DIR="checkpoints"
 
 # Wandb (set to 1 to enable)
 USE_WANDB=0
-WANDB_PROJECT="bench-trm"
+WANDB_PROJECT="recursive-reasoning"
 WANDB_ENTITY=""
 
 # Helper Functions

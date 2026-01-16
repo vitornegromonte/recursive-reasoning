@@ -1,4 +1,4 @@
-"""Configuration management for Bench-TRM experiments."""
+"""Configuration management for Recursive-Reasoning experiments."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,7 +70,7 @@ class WandbConfig:
     """Weights & Biases configuration."""
 
     enabled: bool = False
-    project: str = "bench-trm"
+    project: str = "recursive-reasoning"
     entity: str | None = None
     tags: list[str] = field(default_factory=list)
 

@@ -1,4 +1,4 @@
-# Bench-TRM Configuration Presets
+# Recursive-Reasoning Configuration Presets
 # ================================
 # Standard TRM training configuration.
 
@@ -32,7 +32,7 @@ logging:
 
 wandb:
   enabled: false
-  project: bench-trm
+  project: recursive-reasoning
   entity: null
   tags:
     - trm

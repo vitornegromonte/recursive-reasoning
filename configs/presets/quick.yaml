@@ -1,4 +1,4 @@
-# Bench-TRM Configuration Presets
+# Recursive-Reasoning Configuration Presets
 # ================================
 # Quick test configuration for development/debugging.
 # Use with: python main.py --config configs/presets/quick.yaml

@@ -1,4 +1,4 @@
-# Bench-TRM Configuration
+# Recursive-Reasoning Configuration
 # =======================
 
 # Data configuration
@@ -66,5 +66,5 @@ logging:
   checkpoint_interval: 5
   wandb:
     enabled: false
-    project: "bench-trm"
+    project: "recursive-reasoning"
     entity: null

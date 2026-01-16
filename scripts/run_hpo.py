@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hyperparameter optimization script for Bench-TRM.
+Hyperparameter optimization script for Recursive-Reasoning.
 
 Usage:
     uv run python scripts/run_hpo.py --model trm --n-trials 50
@@ -16,7 +16,7 @@ from src.hpo import HPOConfig, run_hpo, save_best_config
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Hyperparameter optimization for Bench-TRM models"
+        description="Hyperparameter optimization for Recursive-Reasoning models"
     )
 
     # Model selection
@@ -74,7 +74,7 @@ def main() -> None:
         "--study-name",
         type=str,
         default=None,
-        help="Optuna study name (default: bench-trm-{model}-hpo)",
+        help="Optuna study name (default: recursive-reasoning-{model}-hpo)",
     )
     parser.add_argument(
         "--storage",
@@ -105,7 +105,7 @@ def main() -> None:
     print_device_summary(device_info)
 
     # Create config
-    study_name = args.study_name or f"bench-trm-{args.model}-hpo"
+    study_name = args.study_name or f"recursive-reasoning-{args.model}-hpo"
     config = HPOConfig(
         model_type=args.model,
         puzzle_size=args.puzzle_size,

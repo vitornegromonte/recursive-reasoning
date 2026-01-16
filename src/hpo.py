@@ -50,7 +50,7 @@ class HPOConfig:
     # Optuna settings
     n_trials: int = 50
     timeout: int | None = None  # seconds
-    study_name: str = "bench-trm-hpo"
+    study_name: str = "recursive-reasoning-hpo"
     storage: str | None = None  # SQLite URL for persistence
     load_if_exists: bool = True
     direction: Literal["minimize", "maximize"] = "maximize"

@@ -2,7 +2,7 @@
 
 # Default target
 help:
-	@echo "Bench-TRM Development Commands"
+	@echo "Recursive-Reasoning Development Commands"
 	@echo "=============================="
 	@echo ""
 	@echo "Setup:"

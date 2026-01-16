@@ -1,5 +1,5 @@
 [project]
-name = "bench-trm"
+name = "recursive-reasoning"
 version = "0.1.0"
 description = "Benchmark for Tiny Recursive Models on combinatorial reasoning tasks"
 readme = "README.md"
@@ -49,11 +49,11 @@ hpopt = [
     "optuna-dashboard>=0.10.0",
 ]
 all = [
-    "bench-trm[dev,notebook,tracking,hpopt]",
+    "recursive-reasoning[dev,notebook,tracking,hpopt]",
 ]
 
 [project.scripts]
-bench-trm = "main:main"
+recursive-reasoning = "main:main"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

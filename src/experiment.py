@@ -74,7 +74,7 @@ class ExperimentConfig:
     """Configuration for an experiment run."""
 
     # Experiment metadata
-    name: str = "bench-trm"
+    name: str = "recursive-reasoning"
     model_type: str = "trm"  # 'trm' or 'transformer'
     run_id: str = ""  # Will be auto-generated if empty
 
@@ -109,7 +109,7 @@ class ExperimentConfig:
 
     # Wandb configuration
     use_wandb: bool = False
-    wandb_project: str = "bench-trm"
+    wandb_project: str = "recursive-reasoning"
     wandb_entity: str | None = None
     wandb_tags: list = field(default_factory=list)
 
@@ -184,7 +184,7 @@ class ExperimentTracker:
 
         # Setup logger
         self.logger = get_logger(
-            name=f"bench-trm.{config.run_id}",
+            name=f"recursive-reasoning.{config.run_id}",
             log_file=self.log_dir / "training.log",
         )
 
