@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from src.models.lstm import SudokuLSTM
 from src.models.transformer import SudokuTransformer
 from src.models.trm import SudokuTRM, latent_recursion
 from src.models.utils import EMA, AverageMeter
@@ -348,6 +349,148 @@ def evaluate_transformer(
 
     Args:
         model: The SudokuTransformer model to evaluate.
+        dataloader: Evaluation data loader.
+        device: Device to evaluate on.
+
+    Returns:
+        Accuracy as a float between 0 and 1.
+    """
+    model.eval()
+    model.to(device)
+
+    correct = 0
+    total = 0
+
+    for x, y in dataloader:
+        x = x.to(device)
+        y = y.to(device)
+
+        logits = model(x)
+        preds = logits.argmax(dim=-1)
+
+        correct += (preds == y).sum().item()
+        total += preds.numel()
+
+    return correct / total
+
+
+def train_lstm(
+    model: SudokuLSTM | nn.DataParallel[SudokuLSTM],
+    train_loader: DataLoader,
+    test_loader: DataLoader | None,
+    device: torch.device,
+    num_epochs: int = 10,
+    lr: float = 3e-4,
+    weight_decay: float = 1e-4,
+    verbose: bool = True,
+    tracker: Optional["ExperimentTracker"] = None,
+) -> None:
+    """
+    Train an LSTM model on Sudoku.
+
+    Standard supervised training with cross-entropy loss.
+    Supports DataParallel wrapped models for multi-GPU training.
+
+    Args:
+        model: The SudokuLSTM model to train (can be DataParallel wrapped).
+        train_loader: Training data loader.
+        test_loader: Optional test data loader for evaluation.
+        device: Device to train on.
+        num_epochs: Number of training epochs.
+        lr: Learning rate.
+        weight_decay: Weight decay for AdamW.
+        verbose: Whether to print progress.
+        tracker: Optional experiment tracker for logging and checkpoints.
+    """
+    # Get the underlying model for accessing parameters
+    if isinstance(model, nn.DataParallel):
+        base_model: SudokuLSTM = model.module  # type: ignore[assignment]
+    else:
+        base_model = model
+
+    model.to(device)
+
+    optimizer = torch.optim.AdamW(
+        base_model.parameters(),
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Determine starting epoch (for resuming)
+    start_epoch = 0
+    if tracker is not None:
+        start_epoch = tracker.current_epoch
+
+    # Determine log frequency
+    log_every = 100 if tracker is None else tracker.config.log_every
+
+    for epoch in range(start_epoch, num_epochs):
+        model.train()
+        loss_meter = AverageMeter()
+
+        iterator = tqdm(train_loader, desc=f"Epoch {epoch}") if verbose else train_loader
+
+        for x, y in iterator:
+            x = x.to(device)
+            y = y.to(device)
+
+            optimizer.zero_grad()
+
+            # Forward pass
+            logits = model(x)  # (B, num_cells, num_digits)
+            loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
+
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+
+            loss_meter.update(loss.item())
+
+            # Track step
+            if tracker is not None:
+                tracker.step()
+
+                # Log batch metrics periodically
+                if tracker.global_step % log_every == 0:
+                    tracker.log_metrics(
+                        {"loss": loss.item()},
+                        prefix="train",
+                    )
+
+        # End of epoch - evaluate
+        val_acc = None
+        if test_loader is not None:
+            val_acc = evaluate_lstm(base_model, test_loader, device)
+
+        if tracker is not None:
+            tracker.log_epoch(
+                epoch=epoch + 1,
+                train_loss=loss_meter.avg,
+                val_accuracy=val_acc,
+            )
+        elif verbose:
+            msg = f"Epoch {epoch}: loss = {loss_meter.avg:.4f}"
+            if val_acc is not None:
+                msg += f" | val_acc = {val_acc:.4f}"
+            print(msg)
+
+    # Finish tracking
+    if tracker is not None:
+        tracker.finish()
+
+
+@torch.no_grad()
+def evaluate_lstm(
+    model: SudokuLSTM,
+    dataloader: DataLoader,
+    device: torch.device,
+) -> float:
+    """
+    Evaluate an LSTM model on a dataset.
+
+    Args:
+        model: The SudokuLSTM model to evaluate.
         dataloader: Evaluation data loader.
         device: Device to evaluate on.
 

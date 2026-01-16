@@ -27,11 +27,14 @@ from src.experiment import (
     ExperimentConfig,
     ExperimentTracker,
 )
+from src.models.lstm import SudokuLSTM
 from src.models.transformer import SudokuTransformer
 from src.models.trm import SudokuTRM
 from src.training import (
+    evaluate_lstm,
     evaluate_transformer,
     evaluate_trm,
+    train_lstm,
     train_sudoku_trm,
     train_transformer,
 )
@@ -361,6 +364,152 @@ def run_transformer_experiment(
     print(f"\nFinal test accuracy: {acc:.4f}")
 
 
+def run_lstm_experiment(
+    device_info: DeviceInfo,
+    puzzle_size: int = 4,
+    d_model: int = 128,
+    hidden_size: int = 128,
+    num_layers: int = 3,
+    num_epochs: int = 20,
+    batch_size: int = 64,
+    num_blanks: int = 8,
+    num_train_samples: int = 100_000,
+    num_test_samples: int = 10_000,
+    lr: float = 3e-4,
+    scale_lr: bool = True,
+    num_workers: int = 0,
+    use_wandb: bool = False,
+    wandb_project: str = "bench-trm",
+    wandb_entity: str | None = None,
+    checkpoint_dir: str = "checkpoints",
+    log_dir: str = "logs",
+    resume_from: Path | None = None,
+) -> None:
+    """
+    Run a complete LSTM baseline experiment.
+
+    Supports multi-GPU training via DataParallel when multiple GPUs are available.
+
+    Args:
+        device_info: Device configuration from get_device_info().
+        puzzle_size: Size of the Sudoku grid (e.g., 4 for 4x4, 9 for 9x9).
+        d_model: Embedding dimension.
+        hidden_size: LSTM hidden state size.
+        num_layers: Number of LSTM layers.
+        num_epochs: Number of training epochs.
+        batch_size: Batch size per GPU (will be scaled for multi-GPU).
+        num_blanks: Number of blank cells in puzzles.
+        num_train_samples: Number of training samples.
+        num_test_samples: Number of test samples.
+        lr: Base learning rate (will be scaled for multi-GPU if scale_lr=True).
+        scale_lr: Whether to scale LR with number of GPUs (linear scaling rule).
+        num_workers: Number of dataloader workers (0 for auto).
+        use_wandb: Whether to use Weights & Biases logging.
+        wandb_project: Wandb project name.
+        wandb_entity: Wandb entity/team name.
+        checkpoint_dir: Directory for saving checkpoints.
+        log_dir: Directory for saving logs.
+        resume_from: Optional checkpoint path to resume from.
+    """
+    device = device_info.device
+    effective_batch_size = get_effective_batch_size(batch_size, device_info)
+    effective_lr = scale_learning_rate(lr, device_info, scale_lr)
+    num_workers = optimize_dataloader_workers(num_workers, device_info)
+
+    print(f"LSTM experiment: puzzle={puzzle_size}x{puzzle_size}, d_model={d_model}, hidden={hidden_size}, layers={num_layers}")
+    print(f"Batch size: {effective_batch_size} (per-GPU: {batch_size})")
+    print(f"Learning rate: {effective_lr:.2e}" + (f" (scaled from {lr:.2e})" if effective_lr != lr else ""))
+    print(f"DataLoader workers: {num_workers}")
+
+    # Compute puzzle-dependent dimensions
+    num_cells = puzzle_size * puzzle_size
+    num_digits = puzzle_size
+    vocab_size = puzzle_size + 1  # 0 for blank + digits 1..n
+
+    # Create experiment config
+    config = ExperimentConfig(
+        name="sudoku-lstm",
+        model_type="lstm",
+        model_dim=d_model,
+        depth=num_layers,
+        epochs=num_epochs,
+        batch_size=batch_size,
+        learning_rate=lr,
+        num_blanks_train=num_blanks,
+        num_blanks_test=num_blanks,
+        num_train_samples=num_train_samples,
+        num_test_samples=num_test_samples,
+        use_wandb=use_wandb,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        checkpoint_dir=checkpoint_dir,
+        log_dir=log_dir,
+        wandb_tags=["lstm", "sudoku", f"{puzzle_size}x{puzzle_size}"],
+    )
+
+    # Create datasets
+    train_dataset = SudokuDataset(
+        num_samples=num_train_samples,
+        num_blanks=num_blanks,
+        n=puzzle_size,
+    )
+    test_dataset = SudokuDataset(
+        num_samples=num_test_samples,
+        num_blanks=num_blanks,
+        n=puzzle_size,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=effective_batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=device_info.device.type == "cuda",
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=effective_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device_info.device.type == "cuda",
+    )
+
+    # Create model (with multi-GPU support)
+    model = SudokuLSTM(
+        d_model=d_model,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        cell_vocab_size=vocab_size,
+        grid_size=num_cells,
+        num_digits=num_digits,
+    )
+    model = wrap_model_for_multi_gpu(model, device_info)
+
+    # Create experiment tracker (use unwrapped model for checkpointing)
+    tracker = ExperimentTracker(
+        config=config,
+        model=unwrap_model(model),
+        resume_from=resume_from,
+    )
+
+    # Training
+    print("Starting LSTM training...")
+    train_lstm(
+        model=model,
+        train_loader=train_loader,
+        test_loader=test_loader,
+        device=device,
+        num_epochs=num_epochs,
+        lr=effective_lr,
+        tracker=tracker,
+    )
+
+    # Final evaluation (use unwrapped model)
+    eval_model = cast(SudokuLSTM, unwrap_model(model))
+    acc = evaluate_lstm(eval_model, test_loader, device)
+    print(f"\nFinal test accuracy: {acc:.4f}")
+
+
 def main() -> None:
     """Main entry point with CLI argument parsing."""
     parser = argparse.ArgumentParser(
@@ -371,7 +520,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        choices=["trm", "transformer", "both"],
+        choices=["trm", "transformer", "lstm", "all"],
         default="trm",
         help="Model type to train (default: trm)",
     )
@@ -484,7 +633,7 @@ def main() -> None:
     resume_from = Path(args.resume) if args.resume else None
     scale_lr = not args.no_scale_lr
 
-    if args.model in ("trm", "both"):
+    if args.model in ("trm", "all"):
         print("=" * 60)
         print("TRM EXPERIMENT")
         print("=" * 60)
@@ -507,7 +656,7 @@ def main() -> None:
             resume_from=resume_from,
         )
 
-    if args.model in ("transformer", "both"):
+    if args.model in ("transformer", "all"):
         print("\n" + "=" * 60)
         print("TRANSFORMER EXPERIMENT")
         print("=" * 60)
@@ -518,6 +667,29 @@ def main() -> None:
             num_epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr * 3,  # Transformer typically uses higher LR
+            scale_lr=scale_lr,
+            num_workers=args.num_workers,
+            num_train_samples=args.num_train,
+            num_test_samples=args.num_test,
+            use_wandb=args.wandb,
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir,
+            resume_from=resume_from,
+        )
+
+    if args.model in ("lstm", "all"):
+        print("\n" + "=" * 60)
+        print("LSTM EXPERIMENT")
+        print("=" * 60)
+        run_lstm_experiment(
+            device_info=device_info,
+            puzzle_size=args.puzzle_size,
+            d_model=args.dim,
+            num_epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr * 3,  # LSTM typically uses higher LR like Transformer
             scale_lr=scale_lr,
             num_workers=args.num_workers,
             num_train_samples=args.num_train,

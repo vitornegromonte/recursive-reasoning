@@ -126,7 +126,23 @@ run_transformer() {
         --batch-size $BATCH_SIZE \
         --dim $DIM \
         --lr 3e-4 \
-        --puzzle-size $PUZZLE_SIZE  # Transformer uses higher LR
+        --puzzle-size $PUZZLE_SIZE
+}
+
+# LSTM baseline experiments
+run_lstm() {
+    log " LSTM Experiments "
+    
+    # Standard LSTM training
+    run_experiment "lstm-standard" \
+        --model lstm \
+        --epochs $EPOCHS \
+        --num-train $NUM_TRAIN \
+        --num-test $NUM_TEST \
+        --batch-size $BATCH_SIZE \
+        --dim $DIM \
+        --lr 3e-4 \
+        --puzzle-size $PUZZLE_SIZE
 }
 
 # Ablation studies
@@ -173,9 +189,9 @@ run_ablation() {
     done
 }
 
-# Compare TRM vs Transformer
+# Compare TRM vs Transformer vs LSTM
 run_comparison() {
-    log " TRM vs Transformer Comparison "
+    log " TRM vs Transformer vs LSTM Comparison "
     
     run_experiment "compare-trm" \
         --model trm \
@@ -196,6 +212,16 @@ run_comparison() {
         --dim $DIM \
         --lr 3e-4 \
         --puzzle-size $PUZZLE_SIZE
+    
+    run_experiment "compare-lstm" \
+        --model lstm \
+        --epochs $EPOCHS \
+        --num-train $NUM_TRAIN \
+        --num-test $NUM_TEST \
+        --batch-size $BATCH_SIZE \
+        --dim $DIM \
+        --lr 3e-4 \
+        --puzzle-size $PUZZLE_SIZE
 }
 
 # Run all experiments
@@ -203,6 +229,7 @@ run_all() {
     log "=== Running All Experiments ==="
     run_trm
     run_transformer
+    run_lstm
     run_ablation
     run_comparison
 }
@@ -228,6 +255,9 @@ main() {
         transformer)
             run_transformer
             ;;
+        lstm)
+            run_lstm
+            ;;
         ablation)
             run_ablation
             ;;
@@ -239,7 +269,7 @@ main() {
             ;;
         *)
             echo "Unknown experiment: $experiment"
-            echo "Available: quick, trm, transformer, ablation, comparison, all"
+            echo "Available: quick, trm, transformer, lstm, ablation, comparison, all"
             exit 1
             ;;
     esac
