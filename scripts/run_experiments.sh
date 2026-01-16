@@ -1,22 +1,21 @@
 #!/bin/bash
-# =============================================================================
 # Bench-TRM Experiment Runner
-# =============================================================================
 # Usage: ./scripts/run_experiments.sh [experiment_name]
 #
 # Examples:
-#   ./scripts/run_experiments.sh quick      # Quick test run
-#   ./scripts/run_experiments.sh trm        # TRM experiments
+#   ./scripts/run_experiments.sh quick       # Quick test run
+#   ./scripts/run_experiments.sh trm         # TRM experiments
 #   ./scripts/run_experiments.sh transformer # Transformer experiments
-#   ./scripts/run_experiments.sh ablation   # Ablation studies
-#   ./scripts/run_experiments.sh all        # Run all experiments
-# =============================================================================
+#   ./scripts/run_experiments.sh lstm        # LSTM experiments
+#   ./scripts/run_experiments.sh ablation    # Ablation studies
+#   ./scripts/run_experiments.sh comparison  # Compare all models
+#   ./scripts/run_experiments.sh hpo-trm     # Hyperparameter optimization for TRM
+#   ./scripts/run_experiments.sh hpo-all     # HPO for all models
+#   ./scripts/run_experiments.sh all         # Run all experiments
 
 set -e  # Exit on error
 
-# -----------------------------------------------------------------------------
 # Configuration
-# -----------------------------------------------------------------------------
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
@@ -42,9 +41,7 @@ USE_WANDB=0
 WANDB_PROJECT="bench-trm"
 WANDB_ENTITY=""
 
-# -----------------------------------------------------------------------------
 # Helper Functions
-# -----------------------------------------------------------------------------
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
 }
@@ -80,9 +77,7 @@ run_experiment() {
     echo ""
 }
 
-# -----------------------------------------------------------------------------
 # Experiment Definitions
-# -----------------------------------------------------------------------------
 
 # Quick test run (for debugging)
 run_quick() {
@@ -226,7 +221,7 @@ run_comparison() {
 
 # Run all experiments
 run_all() {
-    log "=== Running All Experiments ==="
+    log "Running All Experiments"
     run_trm
     run_transformer
     run_lstm
@@ -234,9 +229,49 @@ run_all() {
     run_comparison
 }
 
-# -----------------------------------------------------------------------------
+# Hyperparameter Optimization
+HPO_TRIALS=50
+HPO_EPOCHS=5
+HPO_TRAIN_SAMPLES=10000
+HPO_STORAGE=""  # Set to "sqlite:///hpo.db" for persistence
+
+run_hpo() {
+    local model=$1
+    log " HPO for $model "
+    
+    local cmd="uv run python scripts/run_hpo.py"
+    cmd="$cmd --model $model"
+    cmd="$cmd --puzzle-size $PUZZLE_SIZE"
+    cmd="$cmd --n-trials $HPO_TRIALS"
+    cmd="$cmd --epochs $HPO_EPOCHS"
+    cmd="$cmd --num-train $HPO_TRAIN_SAMPLES"
+    
+    [[ -n "$HPO_STORAGE" ]] && cmd="$cmd --storage $HPO_STORAGE"
+    
+    log "Running: $cmd"
+    eval "$cmd"
+}
+
+run_hpo_trm() {
+    run_hpo "trm"
+}
+
+run_hpo_transformer() {
+    run_hpo "transformer"
+}
+
+run_hpo_lstm() {
+    run_hpo "lstm"
+}
+
+run_hpo_all() {
+    log "=== Running HPO for All Models ==="
+    run_hpo_trm
+    run_hpo_transformer
+    run_hpo_lstm
+}
+
 # Main
-# -----------------------------------------------------------------------------
 main() {
     local experiment=${1:-quick}
     
@@ -264,12 +299,24 @@ main() {
         comparison)
             run_comparison
             ;;
+        hpo-trm)
+            run_hpo_trm
+            ;;
+        hpo-transformer)
+            run_hpo_transformer
+            ;;
+        hpo-lstm)
+            run_hpo_lstm
+            ;;
+        hpo-all)
+            run_hpo_all
+            ;;
         all)
             run_all
             ;;
         *)
             echo "Unknown experiment: $experiment"
-            echo "Available: quick, trm, transformer, lstm, ablation, comparison, all"
+            echo "Available: quick, trm, transformer, lstm, ablation, comparison, hpo-trm, hpo-transformer, hpo-lstm, hpo-all, all"
             exit 1
             ;;
     esac

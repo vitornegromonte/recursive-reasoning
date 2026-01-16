@@ -44,8 +44,12 @@ notebook = [
 tracking = [
     "wandb>=0.15.0",
 ]
+hpopt = [
+    "optuna>=3.0.0",
+    "optuna-dashboard>=0.10.0",
+]
 all = [
-    "bench-trm[dev,notebook,tracking]",
+    "bench-trm[dev,notebook,tracking,hpopt]",
 ]
 
 [project.scripts]

@@ -634,9 +634,7 @@ def main() -> None:
     scale_lr = not args.no_scale_lr
 
     if args.model in ("trm", "all"):
-        print("=" * 60)
-        print("TRM EXPERIMENT")
-        print("=" * 60)
+        print("\nTRM EXPERIMENT\n")
         run_trm_experiment(
             device_info=device_info,
             puzzle_size=args.puzzle_size,
@@ -657,9 +655,7 @@ def main() -> None:
         )
 
     if args.model in ("transformer", "all"):
-        print("\n" + "=" * 60)
-        print("TRANSFORMER EXPERIMENT")
-        print("=" * 60)
+        print("\nTRANSFORMER EXPERIMENT\n")
         run_transformer_experiment(
             device_info=device_info,
             puzzle_size=args.puzzle_size,
@@ -680,9 +676,7 @@ def main() -> None:
         )
 
     if args.model in ("lstm", "all"):
-        print("\n" + "=" * 60)
-        print("LSTM EXPERIMENT")
-        print("=" * 60)
+        print("\nLSTM EXPERIMENT\n")
         run_lstm_experiment(
             device_info=device_info,
             puzzle_size=args.puzzle_size,
