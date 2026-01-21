@@ -1,6 +1,6 @@
 # There and Back Again: Recursive Computation in Neural Algorithmic Reasonig
 
-Benchmark for comparing Tiny Recursive Models (TRM), Transformers, and LSTMs on combinatorial reasoning tasks (Sudoku).
+Benchmark for comparing Tiny Recursive Models (TRM), Transformers, and LSTMs on combinatorial neural algorithmic reasoning tasks (Sudoku).
 
 ## Installation
 
@@ -62,6 +62,40 @@ uv run python main.py --help
 | `--wandb` | - | Enable Weights & Biases logging |
 | `--num-workers` | 0 | DataLoader workers (0=auto) |
 
+## Dataset
+
+This project uses the **Sudoku-Extreme** dataset from HuggingFace ([sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapientinc/sudoku-extreme)):
+
+- **3.8M training puzzles** with varying difficulty
+- **423K test puzzles** (mathematically inequivalent to training)
+- Mix of easy and extremely hard puzzles from the Sudoku community
+- All 9×9 puzzles with guaranteed unique solutions
+
+```bash
+# Install dataset dependencies
+uv sync --extra data
+```
+
+```python
+from src.data import SudokuExtremeTask, SudokuTaskConfig
+
+# Load with difficulty filtering
+config = SudokuTaskConfig(
+    train_samples=100_000,  # Limit samples (None = all 3.8M)
+    min_rating=100,         # Filter by difficulty
+)
+task = SudokuExtremeTask(config)
+train_ds = task.get_train_dataset()
+```
+
+For quick experiments (4×4 or 16×16 puzzles), use procedural generation:
+
+```python
+from src.data import SudokuProceduralTask
+
+task = SudokuProceduralTask(grid_size=4)  # 4×4, 9×9, or 16×16
+```
+
 ## Running Experiments
 
 ```bash
@@ -84,9 +118,14 @@ uv run python main.py --help
 recursive-reasoning/
 ├── main.py                 # CLI entry point
 ├── src/
-│   ├── data/               # Sudoku dataset
+│   ├── data/
+│   │   ├── tasks/          # Task-based API (extensible)
+│   │   │   ├── base.py     # ReasoningTask interface
+│   │   │   └── sudoku.py   # Sudoku-Extreme & procedural
+│   │   └── sudoku.py       # Legacy procedural generation
 │   ├── models/
 │   │   ├── trm.py          # Tiny Recursive Model
+│   │   ├── mlp.py          # MLP-Mixer operator
 │   │   ├── transformer.py  # Transformer baseline
 │   │   └── lstm.py         # LSTM baseline
 │   ├── training.py         # Training loops

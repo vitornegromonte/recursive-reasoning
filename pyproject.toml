@@ -48,8 +48,12 @@ hpopt = [
     "optuna>=3.0.0",
     "optuna-dashboard>=0.10.0",
 ]
+data = [
+    "datasets>=2.14.0",
+    "huggingface-hub>=0.16.0",
+]
 all = [
-    "recursive-reasoning[dev,notebook,tracking,hpopt]",
+    "recursive-reasoning[dev,notebook,tracking,hpopt,data]",
 ]
 
 [project.scripts]

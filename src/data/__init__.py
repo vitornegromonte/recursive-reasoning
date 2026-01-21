@@ -16,7 +16,16 @@ from .sudoku import (
     sample_solution,
 )
 
+# New task-based API
+from .tasks import (
+    ReasoningTask,
+    SudokuExtremeTask,
+    SudokuProceduralTask,
+    TaskConfig,
+)
+
 __all__ = [
+    # Legacy API (backwards compatible)
     "SudokuDataset",
     "generate_sudoku_sample",
     "encode_puzzle",
@@ -28,4 +37,9 @@ __all__ = [
     "permute_rows",
     "permute_cols",
     "BASE_SOLUTION",
+    # New task-based API
+    "ReasoningTask",
+    "TaskConfig",
+    "SudokuExtremeTask",
+    "SudokuProceduralTask",
 ]
