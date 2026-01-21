@@ -106,36 +106,153 @@ class MLP(nn.Module):
         return self.network[1:](h)
 
 
+class MLPMixerBlock(nn.Module):
+    """
+    MLP-Mixer block with token mixing and channel mixing.
+
+    Applies:
+    1. Token mixing: MLP across the token/patch dimension
+    2. Channel mixing: MLP across the channel/feature dimension
+
+    Each mixing step uses pre-normalization and residual connections.
+    """
+
+    def __init__(
+        self,
+        num_tokens: int,
+        hidden_dim: int,
+        token_mlp_dim: int | None = None,
+        channel_mlp_dim: int | None = None,
+        activation: type[nn.Module] = nn.GELU,
+        dropout: float = 0.0,
+    ):
+        """
+        Initialize the MLP-Mixer block.
+
+        Args:
+            num_tokens: Number of tokens (patches) in the input.
+            hidden_dim: Hidden/channel dimension of each token.
+            token_mlp_dim: Hidden dim for token mixing MLP (default: num_tokens * 4).
+            channel_mlp_dim: Hidden dim for channel mixing MLP (default: hidden_dim * 4).
+            activation: Activation function class.
+            dropout: Dropout probability.
+        """
+        super().__init__()
+
+        token_mlp_dim = token_mlp_dim or num_tokens * 4
+        channel_mlp_dim = channel_mlp_dim or hidden_dim * 4
+
+        # Token mixing (across spatial dimension)
+        self.token_norm = nn.LayerNorm(hidden_dim)
+        self.token_mlp = nn.Sequential(
+            nn.Linear(num_tokens, token_mlp_dim),
+            activation(),
+            nn.Dropout(dropout),
+            nn.Linear(token_mlp_dim, num_tokens),
+            nn.Dropout(dropout),
+        )
+
+        # Channel mixing (across feature dimension)
+        self.channel_norm = nn.LayerNorm(hidden_dim)
+        self.channel_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, channel_mlp_dim),
+            activation(),
+            nn.Dropout(dropout),
+            nn.Linear(channel_mlp_dim, hidden_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the mixer block.
+
+        Args:
+            x: Input tensor of shape (batch, num_tokens, hidden_dim).
+
+        Returns:
+            Output tensor of shape (batch, num_tokens, hidden_dim).
+        """
+        # Token mixing: transpose to (batch, hidden_dim, num_tokens), apply MLP, transpose back
+        h = self.token_norm(x)
+        h = h.transpose(1, 2)  # (batch, hidden_dim, num_tokens)
+        h = self.token_mlp(h)
+        h = h.transpose(1, 2)  # (batch, num_tokens, hidden_dim)
+        x = x + h
+
+        # Channel mixing
+        h = self.channel_norm(x)
+        h = self.channel_mlp(h)
+        x = x + h
+
+        return x
+
+
 class TinyTRMMLP(nn.Module):
     """
-    Tiny MLP operator specifically designed for TRM.
+    MLP-Mixer operator specifically designed for TRM.
 
     This is a SINGLE recursive operator reused for all recursion steps.
-    Uses a 2-layer MLP with configurable activation.
+    Uses MLP-Mixer architecture with token and channel mixing for improved
+    information flow across the latent representation.
+
+    The input is reshaped into patches/tokens to enable spatial mixing.
     """
 
     def __init__(
         self,
         dim: int,
-        activation: type[nn.Module] = nn.SiLU,
+        num_patches: int = 8,
+        num_mixer_layers: int = 2,
+        expansion_factor: int = 4,
+        activation: type[nn.Module] = nn.GELU,
+        dropout: float = 0.0,
         weight_init: str = "xavier",
     ):
         """
-        Initialize the TRM MLP operator.
+        Initialize the TRM MLP-Mixer operator.
 
         Args:
             dim: Shared dimensionality for x, y, z states.
+            num_patches: Number of patches to split the concatenated input into.
+            num_mixer_layers: Number of MLP-Mixer blocks.
+            expansion_factor: Expansion factor for MLPs (default: 4).
             activation: Activation function class.
+            dropout: Dropout probability.
             weight_init: Weight initialization method.
         """
         super().__init__()
 
         self.dim = dim
-        self.activation = activation()
+        self.num_patches = num_patches
 
-        # Fixed 2-layer MLP
-        self.fc1 = nn.Linear(3 * dim, dim)
-        self.fc2 = nn.Linear(dim, dim)
+        # Input dimension is 3*dim (concatenation of a, b, c)
+        input_dim = 3 * dim
+
+        # Ensure input_dim is divisible by num_patches
+        assert input_dim % num_patches == 0, (
+            f"Input dim ({input_dim}) must be divisible by num_patches ({num_patches})"
+        )
+        self.patch_dim = input_dim // num_patches
+
+        # Project patches to hidden dimension
+        self.patch_embed = nn.Linear(self.patch_dim, dim)
+
+        # MLP-Mixer blocks
+        self.mixer_blocks = nn.ModuleList([
+            MLPMixerBlock(
+                num_tokens=num_patches,
+                hidden_dim=dim,
+                token_mlp_dim=num_patches * expansion_factor,
+                channel_mlp_dim=dim * expansion_factor,
+                activation=activation,
+                dropout=dropout,
+            )
+            for _ in range(num_mixer_layers)
+        ])
+
+        # Final normalization and projection
+        self.final_norm = nn.LayerNorm(dim)
+        self.output_proj = nn.Linear(num_patches * dim, dim)
 
         self._initialize_weights(weight_init)
 
@@ -149,6 +266,10 @@ class TinyTRMMLP(nn.Module):
                     nn.init.orthogonal_(module.weight)
                 else:
                     raise ValueError(f"Unknown weight_init: {weight_init}")
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
     def forward(
@@ -158,23 +279,40 @@ class TinyTRMMLP(nn.Module):
         c: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
-        Apply the TRM operator.
+        Apply the TRM MLP-Mixer operator.
 
         Flexible interface:
             - net(x, y, z) -> update z (reasoning)
             - net(y, z)    -> update y (refinement)
 
         Args:
-            a: First input tensor.
-            b: Second input tensor.
+            a: First input tensor of shape (batch, dim).
+            b: Second input tensor of shape (batch, dim).
             c: Optional third input tensor (defaults to zeros).
 
         Returns:
-            Updated state tensor.
+            Updated state tensor of shape (batch, dim).
         """
         if c is None:
             c = torch.zeros_like(a)
 
+        # Concatenate inputs: (batch, 3*dim)
         x = torch.cat([a, b, c], dim=-1)
-        h = self.activation(self.fc1(x))
-        return self.fc2(h)
+
+        # Reshape to patches: (batch, num_patches, patch_dim)
+        batch_size = x.size(0)
+        x = x.view(batch_size, self.num_patches, self.patch_dim)
+
+        # Embed patches: (batch, num_patches, dim)
+        x = self.patch_embed(x)
+
+        # Apply MLP-Mixer blocks
+        for block in self.mixer_blocks:
+            x = block(x)
+
+        # Final norm and flatten
+        x = self.final_norm(x)
+        x = x.view(batch_size, -1)  # (batch, num_patches * dim)
+
+        # Project to output dimension
+        return self.output_proj(x)

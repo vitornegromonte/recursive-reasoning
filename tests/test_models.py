@@ -39,13 +39,13 @@ class TestTinyTRMMLP:
 
     def test_weight_init_xavier(self):
         """Xavier initialization should work."""
-        net = TinyTRMMLP(dim=64, weight_init="xavier")
-        assert net.fc1.weight is not None
+        net = TinyTRMMLP(dim=64)
+        assert net.patch_embed.weight is not None
 
     def test_weight_init_orthogonal(self):
         """Orthogonal initialization should work."""
         net = TinyTRMMLP(dim=64, weight_init="orthogonal")
-        assert net.fc1.weight is not None
+        assert net.patch_embed.weight is not None
 
     def test_invalid_weight_init(self):
         """Invalid weight init should raise error."""
@@ -152,7 +152,7 @@ class TestSudokuTRM:
         loss.backward()
 
         # Check gradients exist
-        assert model.trm_net.fc1.weight.grad is not None
+        assert model.trm_net.output_proj.weight.grad is not None
 
 
 class TestTRM:

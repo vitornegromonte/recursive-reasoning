@@ -10,13 +10,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 try:
-    import optuna
-    from optuna.trial import Trial
+    import optuna  # type: ignore[import-not-found]
+    from optuna.trial import Trial  # type: ignore[import-not-found]
 
     OPTUNA_AVAILABLE = True
 except ImportError:
     OPTUNA_AVAILABLE = False
-    Trial = Any  # type: ignore[assignment,misc]
+    Trial = Any
 
 from src.data import SudokuDataset
 from src.distributed import (
