@@ -30,8 +30,6 @@ from src.experiment import (
     ExperimentTracker,
 )
 from src.logging_utils import (
-    compute_gradient_norm,
-    compute_parameter_norm,
     create_experiment_logger,
 )
 from src.models.lstm import SudokuLSTM
@@ -109,7 +107,6 @@ def run_trm_experiment(
         seed: Random seed for reproducibility.
         dataset: Dataset type: 'procedural' or 'extreme' (Sudoku-Extreme 9x9).
     """
-    import time
 
     device = device_info.device
     effective_batch_size = get_effective_batch_size(batch_size, device_info)
@@ -250,64 +247,21 @@ def run_trm_experiment(
 
     # Training with mechanistic logging
     print("Starting TRM training...")
-    for epoch in range(num_epochs):
-        epoch_start = time.time()
 
-        # Run one epoch of training
-        train_sudoku_trm(
-            model=model,
-            dataloader=train_loader,
-            device=device,
-            epochs=1,  # Single epoch
-            T=T_train,
-            N_SUP=N_SUP,
-            lr=effective_lr,
-            tracker=None,  # We handle logging ourselves
-            test_loader=None,
-            T_eval=T_eval,
-            start_epoch=epoch,  # Pass actual epoch for correct display
-        )
-
-        epoch_time = time.time() - epoch_start
-
-        # Evaluate
-        eval_model = cast(SudokuTRM, unwrap_model(model))
-        val_acc = evaluate_trm(eval_model, test_loader, device, T=T_eval)
-
-        # Compute gradient and parameter norms
-        grad_norm = compute_gradient_norm(eval_model)
-        param_norm = compute_parameter_norm(eval_model)
-
-        # Log epoch metrics
-        exp_logger.log_epoch(
-            epoch=epoch + 1,
-            train_loss=0.0,  # TODO: capture from training
-            val_accuracy=val_acc,
-            gradient_norm=grad_norm,
-            parameter_norm=param_norm,
-            learning_rate=effective_lr,
-            epoch_time=epoch_time,
-        )
-
-        # Log recursion probing (TRM only)
-        if log_recursion:
-            exp_logger.log_recursion_probe(
-                epoch=epoch + 1,
-                model=eval_model,
-                max_steps=T_eval,
-                device=device,
-            )
-
-        # Log latent state statistics (TRM only)
-        if log_latent_stats:
-            exp_logger.log_latent_stats(
-                epoch=epoch + 1,
-                model=eval_model,
-                max_steps=T_eval,
-                device=device,
-            )
-
-        print(f"Epoch {epoch + 1}/{num_epochs}: val_acc={val_acc:.4f}, time={epoch_time:.1f}s")
+    # Run all epochs in one call (optimizer/scheduler/EMA persist across epochs)
+    train_sudoku_trm(
+        model=model,
+        dataloader=train_loader,
+        device=device,
+        epochs=num_epochs,
+        T=T_train,
+        N_SUP=N_SUP,
+        lr=effective_lr,
+        tracker=None,
+        test_loader=test_loader,
+        T_eval=T_eval,
+        start_epoch=0,
+    )
 
     exp_logger.finish()
 
