@@ -24,7 +24,6 @@ CHECKPOINT_DIR="checkpoints"
 mkdir -p "$LOG_DIR"
 mkdir -p "$CHECKPOINT_DIR"
 
-# =============================================================
 # TRM Paper Configuration (Sudoku-Extreme)
 # Paper: batch_size=768, hidden=512, N_SUP=16, T=3, n=6
 #        AdamW β1=0.9, β2=0.95, lr=1e-4, weight_decay=1.0
@@ -34,7 +33,11 @@ mkdir -p "$CHECKPOINT_DIR"
 #   L_layers=2 (MLP-Mixer layers in operator)
 #   H_cycles=3 (improvement steps = T_TRAIN)
 #   L_cycles=6 (latent updates per improvement step)
-# =============================================================
+#
+# Model sizes (~5M params each for fair comparison):
+#   TRM:         dim=368, cell_embed=48 → 5.01M
+#   Transformer: dim=288, depth=8, d_ff=512 → 5.07M
+#   LSTM:        hidden=288, layers=3 → 4.97M
 
 # Infrastructure (adjust batch size for your GPU memory)
 # Paper uses batch_size=768 on L40S (40GB)
@@ -44,19 +47,21 @@ NUM_TEST=2000
 PUZZLE_SIZE=9
 DATASET="extreme"
 
-# TRM config from paper
-TRM_DIM=512
-TRM_CELL_EMBED=32
+# TRM config (~5.01M params)
+TRM_DIM=368
+TRM_CELL_EMBED=48
 T_TRAIN=3       # H_cycles: improvement steps
-L_CYCLES=6      # L_cycles: latent updates per improvement step  
-N_SUP=16        # Supervision points per batch (deep supervision)
+L_CYCLES=6      # L_cycles: latent updates per improvement step
+N_SUP=6         # Supervision points per batch
 T_EVAL=42       # "Depth 42" from paper table
 
-# Baselines matched to similar param count (~8-10M)
-TRANSFORMER_DIM=320
+# Transformer baseline (~5.07M params)
+TRANSFORMER_DIM=288
 TRANSFORMER_DEPTH=8
-TRANSFORMER_DFF=1024
-LSTM_HIDDEN=400
+TRANSFORMER_DFF=512
+
+# LSTM baseline (~4.97M params)
+LSTM_HIDDEN=288
 LSTM_LAYERS=3
 
 # Data scarcity regimes (for workshop experiments)
