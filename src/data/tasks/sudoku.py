@@ -96,8 +96,8 @@ class SudokuExtremeDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             cache_dir: Directory to cache the downloaded dataset.
         """
         try:
-            import pandas as pd
-            from huggingface_hub import hf_hub_download
+            import pandas as pd  # type: ignore[import-not-found]
+            from huggingface_hub import hf_hub_download  # type: ignore[import-not-found]
         except ImportError as e:
             raise ImportError(
                 "HuggingFace datasets is required for Sudoku-Extreme. "
