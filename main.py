@@ -10,6 +10,7 @@ import argparse
 from pathlib import Path
 from typing import cast
 
+import torch
 from torch.utils.data import DataLoader
 
 from src.data import SudokuDataset
@@ -26,6 +27,11 @@ from src.distributed import (
 from src.experiment import (
     ExperimentConfig,
     ExperimentTracker,
+)
+from src.logging_utils import (
+    compute_gradient_norm,
+    compute_parameter_norm,
+    create_experiment_logger,
 )
 from src.models.lstm import SudokuLSTM
 from src.models.transformer import SudokuTransformer
@@ -62,6 +68,10 @@ def run_trm_experiment(
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
     resume_from: Path | None = None,
+    # Mechanistic logging
+    log_recursion: bool = False,
+    log_latent_stats: bool = False,
+    seed: int = 42,
 ) -> None:
     """
     Run a complete TRM training and evaluation experiment.
@@ -90,7 +100,12 @@ def run_trm_experiment(
         checkpoint_dir: Directory for saving checkpoints.
         log_dir: Directory for saving logs.
         resume_from: Optional checkpoint path to resume from.
+        log_recursion: Whether to log recursion step metrics.
+        log_latent_stats: Whether to log latent state statistics.
+        seed: Random seed for reproducibility.
     """
+    import time
+
     device = device_info.device
     effective_batch_size = get_effective_batch_size(batch_size, device_info)
     effective_lr = scale_learning_rate(lr, device_info, scale_lr)
@@ -164,29 +179,107 @@ def run_trm_experiment(
         num_cells=num_cells,
         num_digits=num_digits,
     )
+
+    # Create experiment logger (mechanistic logging)
+    exp_logger = create_experiment_logger(
+        model=model,
+        model_type="trm",
+        dataset_size=num_train_samples,
+        test_size=num_test_samples,
+        batch_size=batch_size,
+        epochs=num_epochs,
+        learning_rate=effective_lr,
+        seed=seed,
+        log_dir=log_dir,
+        log_recursion=log_recursion,
+        log_latent_stats=log_latent_stats,
+        model_dim=trm_dim,
+        recursion_depth_train=T_train,
+        recursion_depth_eval=T_eval,
+        n_sup=N_SUP,
+        device=str(device),
+        num_gpus=device_info.num_gpus,
+    )
+    print(f"Experiment ID: {exp_logger.experiment_id}")
+    print(f"Logs will be saved to: {exp_logger.log_dir}")
+
+    # Set probe batch for mechanistic logging (first test batch)
+    if log_recursion or log_latent_stats:
+        probe_iter = iter(test_loader)
+        probe_x, probe_y = next(probe_iter)
+        exp_logger.set_probe_batch(probe_x, probe_y)
+
     model = wrap_model_for_multi_gpu(model, device_info)
 
-    # Create experiment tracker (use unwrapped model for checkpointing)
-    tracker = ExperimentTracker(
+    # Note: ExperimentTracker is available for WandB/checkpoint integration
+    # but we use ExperimentLogger for mechanistic logging
+    _ = ExperimentTracker(
         config=config,
         model=unwrap_model(model),
         resume_from=resume_from,
     )
 
-    # Training
+    # Training with mechanistic logging
     print("Starting TRM training...")
-    train_sudoku_trm(
-        model=model,
-        dataloader=train_loader,
-        device=device,
-        epochs=num_epochs,
-        T=T_train,
-        N_SUP=N_SUP,
-        lr=effective_lr,
-        tracker=tracker,
-        test_loader=test_loader,
-        T_eval=T_eval,
-    )
+    for epoch in range(num_epochs):
+        epoch_start = time.time()
+
+        # Run one epoch of training
+        train_sudoku_trm(
+            model=model,
+            dataloader=train_loader,
+            device=device,
+            epochs=1,  # Single epoch
+            T=T_train,
+            N_SUP=N_SUP,
+            lr=effective_lr,
+            tracker=None,  # We handle logging ourselves
+            test_loader=None,
+            T_eval=T_eval,
+        )
+
+        epoch_time = time.time() - epoch_start
+
+        # Evaluate
+        eval_model = cast(SudokuTRM, unwrap_model(model))
+        val_acc = evaluate_trm(eval_model, test_loader, device, T=T_eval)
+
+        # Compute gradient and parameter norms
+        grad_norm = compute_gradient_norm(eval_model)
+        param_norm = compute_parameter_norm(eval_model)
+
+        # Log epoch metrics
+        exp_logger.log_epoch(
+            epoch=epoch + 1,
+            train_loss=0.0,  # TODO: capture from training
+            val_accuracy=val_acc,
+            gradient_norm=grad_norm,
+            parameter_norm=param_norm,
+            learning_rate=effective_lr,
+            epoch_time=epoch_time,
+        )
+
+        # Log recursion probing (TRM only)
+        if log_recursion:
+            exp_logger.log_recursion_probe(
+                epoch=epoch + 1,
+                model=eval_model,
+                max_steps=T_eval,
+                device=device,
+            )
+
+        # Log latent state statistics (TRM only)
+        if log_latent_stats:
+            exp_logger.log_latent_stats(
+                epoch=epoch + 1,
+                model=eval_model,
+                max_steps=T_eval,
+                device=device,
+            )
+
+        print(f"Epoch {epoch + 1}/{num_epochs}: val_acc={val_acc:.4f}, time={epoch_time:.1f}s")
+
+    exp_logger.finish()
 
     # For evaluation, use unwrapped model
     eval_model = cast(SudokuTRM, unwrap_model(model))
@@ -604,6 +697,24 @@ def main() -> None:
         help="Wandb entity/team name",
     )
 
+    # Mechanistic logging (new)
+    parser.add_argument(
+        "--log-recursion",
+        action="store_true",
+        help="Log accuracy/loss at each recursion step (TRM only)",
+    )
+    parser.add_argument(
+        "--log-latent-stats",
+        action="store_true",
+        help="Log latent state statistics for mechanistic analysis (TRM only)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)",
+    )
+
     # Checkpointing
     parser.add_argument(
         "--checkpoint-dir",
@@ -625,6 +736,16 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    # Set random seeds for reproducibility
+    import random
+
+    import numpy as np
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     # Get device info and print summary
     device_info = get_device_info()
@@ -652,6 +773,9 @@ def main() -> None:
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir,
             resume_from=resume_from,
+            log_recursion=args.log_recursion,
+            log_latent_stats=args.log_latent_stats,
+            seed=args.seed,
         )
 
     if args.model in ("transformer", "all"):
