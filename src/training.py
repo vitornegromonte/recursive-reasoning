@@ -36,6 +36,7 @@ def train_sudoku_trm(
     tracker: Optional["ExperimentTracker"] = None,
     test_loader: DataLoader | None = None,
     T_eval: int = 32,
+    start_epoch: int = 0,
 ) -> None:
     """
     Train a Sudoku TRM model with deep supervision.
@@ -62,6 +63,7 @@ def train_sudoku_trm(
         tracker: Optional experiment tracker for logging and checkpoints.
         test_loader: Optional test data loader for validation.
         T_eval: Number of recursion steps for evaluation.
+        start_epoch: Starting epoch number for display (default 0).
     """
     # Get the underlying model for accessing submodules
     if isinstance(model, nn.DataParallel):
@@ -84,19 +86,20 @@ def train_sudoku_trm(
     ema_trm = EMA(base_model.trm_net, decay=ema_decay)
     ema_head = EMA(base_model.output_head, decay=ema_decay)
 
-    # Determine starting epoch (for resuming)
-    start_epoch = 0
+    # Determine starting epoch (for resuming or single-epoch calls)
+    epoch_offset = start_epoch
     if tracker is not None:
-        start_epoch = tracker.current_epoch
+        epoch_offset = tracker.current_epoch
 
     # Determine log frequency
     log_every = 100 if tracker is None else tracker.config.log_every
 
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(epochs):
+        actual_epoch = epoch_offset + epoch
         loss_meter = AverageMeter()
         batch_count = 0
 
-        iterator = tqdm(dataloader, desc=f"Epoch {epoch + 1}") if verbose else dataloader
+        iterator = tqdm(dataloader, desc=f"Epoch {actual_epoch + 1}") if verbose else dataloader
 
         for x_raw, y_target in iterator:
             x_raw = x_raw.to(device)
@@ -163,12 +166,12 @@ def train_sudoku_trm(
 
         if tracker is not None:
             tracker.log_epoch(
-                epoch=epoch + 1,
+                epoch=actual_epoch + 1,
                 train_loss=loss_meter.avg,
                 val_accuracy=val_acc,
             )
         elif verbose:
-            msg = f"Epoch {epoch + 1}: loss = {loss_meter.avg:.4f}"
+            msg = f"Epoch {actual_epoch + 1}: loss = {loss_meter.avg:.4f}"
             if val_acc is not None:
                 msg += f" | val_acc = {val_acc:.4f}"
             print(msg)

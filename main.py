@@ -236,6 +236,7 @@ def run_trm_experiment(
             tracker=None,  # We handle logging ourselves
             test_loader=None,
             T_eval=T_eval,
+            start_epoch=epoch,  # Pass actual epoch for correct display
         )
 
         epoch_time = time.time() - epoch_start
