@@ -39,6 +39,7 @@ def train_sudoku_trm(
     test_loader: DataLoader | None = None,
     T_eval: int = 32,
     start_epoch: int = 0,
+    use_amp: bool = False,
 ) -> None:
     """
     Train a Sudoku TRM model with deep supervision.
@@ -74,6 +75,7 @@ def train_sudoku_trm(
         test_loader: Optional test data loader for validation.
         T_eval: Number of improvement steps for evaluation.
         start_epoch: Starting epoch number for display (default 0).
+        use_amp: Whether to use automatic mixed precision (default False).
     """
     # Get the underlying model for accessing submodules
     if isinstance(model, nn.DataParallel):
@@ -126,6 +128,13 @@ def train_sudoku_trm(
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     global_step = 0
 
+    # Mixed precision setup
+    scaler = torch.amp.GradScaler(enabled=use_amp)
+    autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=use_amp)
+
+    if verbose and start_epoch == 0 and use_amp:
+        print("Using automatic mixed precision (AMP)")
+
     # Determine starting epoch (for resuming or single-epoch calls)
     epoch_offset = start_epoch
     if tracker is not None:
@@ -165,17 +174,19 @@ def train_sudoku_trm(
 
                 # Final improvement step with gradients
                 optimizer.zero_grad()
-                y, z = latent_recursion(
-                    base_model.trm_net, x, y, z, n=1, l_cycles=L_cycles
-                )
+                with autocast_ctx:
+                    y, z = latent_recursion(
+                        base_model.trm_net, x, y, z, n=1, l_cycles=L_cycles
+                    )
 
-                # Compute loss
-                logits = base_model.output_head(y)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), y_target.view(-1))
+                    # Compute loss
+                    logits = base_model.output_head(y)
+                    loss = loss_fn(logits.view(-1, logits.size(-1)), y_target.view(-1))
 
-                # Backpropagate
-                loss.backward()
-                optimizer.step()
+                # Backpropagate with gradient scaling
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 scheduler.step()  # LR warmup
                 global_step += 1
 
@@ -294,6 +305,7 @@ def train_transformer(
     weight_decay: float = 1e-4,
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
+    use_amp: bool = False,
 ) -> None:
     """
     Train a Transformer model on Sudoku.
@@ -311,6 +323,7 @@ def train_transformer(
         weight_decay: Weight decay for AdamW.
         verbose: Whether to print progress.
         tracker: Optional experiment tracker for logging and checkpoints.
+        use_amp: Whether to use automatic mixed precision (default False).
     """
     # Get the underlying model for accessing parameters
     if isinstance(model, nn.DataParallel):
@@ -319,6 +332,13 @@ def train_transformer(
         base_model = model
 
     model.to(device)
+
+    # Mixed precision setup
+    scaler = torch.amp.GradScaler(enabled=use_amp)
+    autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=use_amp)
+
+    if verbose and use_amp:
+        print("Using automatic mixed precision (AMP)")
 
     optimizer = torch.optim.AdamW(
         base_model.parameters(),
@@ -347,13 +367,15 @@ def train_transformer(
 
             optimizer.zero_grad()
 
-            # Forward pass
-            logits = model(x)  # (B, num_cells, num_digits)
-            loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
+            # Forward pass with mixed precision
+            with autocast_ctx:
+                logits = model(x)  # (B, num_cells, num_digits)
+                loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
 
-            # Backward pass
-            loss.backward()
-            optimizer.step()
+            # Backward pass with gradient scaling
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             loss_meter.update(loss.item())
 
@@ -436,6 +458,7 @@ def train_lstm(
     weight_decay: float = 1e-4,
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
+    use_amp: bool = False,
 ) -> None:
     """
     Train an LSTM model on Sudoku.
@@ -453,6 +476,7 @@ def train_lstm(
         weight_decay: Weight decay for AdamW.
         verbose: Whether to print progress.
         tracker: Optional experiment tracker for logging and checkpoints.
+        use_amp: Whether to use automatic mixed precision (default False).
     """
     # Get the underlying model for accessing parameters
     if isinstance(model, nn.DataParallel):
@@ -461,6 +485,13 @@ def train_lstm(
         base_model = model
 
     model.to(device)
+
+    # Mixed precision setup
+    scaler = torch.amp.GradScaler(enabled=use_amp)
+    autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=use_amp)
+
+    if verbose and use_amp:
+        print("Using automatic mixed precision (AMP)")
 
     optimizer = torch.optim.AdamW(
         base_model.parameters(),
@@ -489,13 +520,15 @@ def train_lstm(
 
             optimizer.zero_grad()
 
-            # Forward pass
-            logits = model(x)  # (B, num_cells, num_digits)
-            loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
+            # Forward pass with mixed precision
+            with autocast_ctx:
+                logits = model(x)  # (B, num_cells, num_digits)
+                loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
 
-            # Backward pass
-            loss.backward()
-            optimizer.step()
+            # Backward pass with gradient scaling
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             loss_meter.update(loss.item())
 

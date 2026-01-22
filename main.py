@@ -75,6 +75,7 @@ def run_trm_experiment(
     seed: int = 42,
     # Dataset selection
     dataset: str = "procedural",
+    use_amp: bool = False,
 ) -> None:
     """
     Run a complete TRM training and evaluation experiment.
@@ -264,6 +265,7 @@ def run_trm_experiment(
         test_loader=test_loader,
         T_eval=T_eval,
         start_epoch=0,
+        use_amp=use_amp,
     )
 
     exp_logger.finish()
@@ -316,6 +318,7 @@ def run_transformer_experiment(
     log_dir: str = "logs",
     resume_from: Path | None = None,
     dataset: str = "procedural",
+    use_amp: bool = False,
 ) -> None:
     """
     Run a complete Transformer baseline experiment.
@@ -461,6 +464,7 @@ def run_transformer_experiment(
         num_epochs=num_epochs,
         lr=effective_lr,
         tracker=tracker,
+        use_amp=use_amp,
     )
 
     # Final evaluation (use unwrapped model)
@@ -490,6 +494,7 @@ def run_lstm_experiment(
     log_dir: str = "logs",
     resume_from: Path | None = None,
     dataset: str = "procedural",
+    use_amp: bool = False,
 ) -> None:
     """
     Run a complete LSTM baseline experiment.
@@ -632,6 +637,7 @@ def run_lstm_experiment(
         num_epochs=num_epochs,
         lr=effective_lr,
         tracker=tracker,
+        use_amp=use_amp,
     )
 
     # Final evaluation (use unwrapped model)
@@ -832,6 +838,11 @@ def main() -> None:
         default=None,
         help="Path to checkpoint to resume training from",
     )
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Enable automatic mixed precision (AMP) for faster training",
+    )
 
     args = parser.parse_args()
 
@@ -880,6 +891,7 @@ def main() -> None:
             log_latent_stats=args.log_latent_stats,
             seed=args.seed,
             dataset=args.dataset,
+            use_amp=args.amp,
         )
 
     if args.model in ("transformer", "all"):
@@ -904,6 +916,7 @@ def main() -> None:
             log_dir=args.log_dir,
             resume_from=resume_from,
             dataset=args.dataset,
+            use_amp=args.amp,
         )
 
     if args.model in ("lstm", "all"):
@@ -929,6 +942,7 @@ def main() -> None:
             log_dir=args.log_dir,
             resume_from=resume_from,
             dataset=args.dataset,
+            use_amp=args.amp,
         )
 
 

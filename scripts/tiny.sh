@@ -91,6 +91,7 @@ LR_BASELINE=1e-4
 # Workers / infra
 NUM_WORKERS=0
 SCALE_LR=0  # Disable LR scaling, paper uses fixed 1e-4
+USE_AMP=1   # Enable mixed precision (AMP) for faster training
 
 # Utilities
 log() {
@@ -109,6 +110,7 @@ run_experiment() {
     cmd="$cmd --log-dir $LOG_DIR --checkpoint-dir $CHECKPOINT_DIR"
     cmd="$cmd --num-workers $NUM_WORKERS"
     [[ $SCALE_LR -eq 0 ]] && cmd="$cmd --no-scale-lr"
+    [[ $USE_AMP -eq 1 ]] && cmd="$cmd --amp"
 
     log "Running: $cmd"
     eval "$cmd"
