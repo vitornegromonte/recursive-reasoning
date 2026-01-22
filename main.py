@@ -180,11 +180,15 @@ def run_trm_experiment(
             n=puzzle_size,
         )
 
+    # Cap batch size to training set size (avoid 0 batches)
+    train_batch_size = min(effective_batch_size, len(train_dataset))
+    if train_batch_size < effective_batch_size:
+        print(f"Warning: Batch size {effective_batch_size} > train samples {len(train_dataset)}. Using batch_size={train_batch_size}")
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=effective_batch_size,
+        batch_size=train_batch_size,
         shuffle=True,
-        drop_last=True,
         num_workers=num_workers,
         pin_memory=device_info.device.type == "cuda",
     )
@@ -451,9 +455,14 @@ def run_transformer_experiment(
             n=puzzle_size,
         )
 
+    # Cap batch size to training set size (avoid 0 batches)
+    train_batch_size = min(effective_batch_size, len(train_dataset))
+    if train_batch_size < effective_batch_size:
+        print(f"Warning: Batch size {effective_batch_size} > train samples {len(train_dataset)}. Using batch_size={train_batch_size}")
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=effective_batch_size,
+        batch_size=train_batch_size,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=device_info.device.type == "cuda",
@@ -618,9 +627,14 @@ def run_lstm_experiment(
             n=puzzle_size,
         )
 
+    # Cap batch size to training set size (avoid 0 batches)
+    train_batch_size = min(effective_batch_size, len(train_dataset))
+    if train_batch_size < effective_batch_size:
+        print(f"Warning: Batch size {effective_batch_size} > train samples {len(train_dataset)}. Using batch_size={train_batch_size}")
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=effective_batch_size,
+        batch_size=train_batch_size,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=device_info.device.type == "cuda",

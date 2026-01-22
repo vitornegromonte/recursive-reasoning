@@ -82,9 +82,9 @@ def train_sudoku_trm(
         + list(base_model.output_head.parameters())
     )
 
-    # Log parameter count at start
+    # Log parameter count at start (only on first epoch)
     num_params = sum(p.numel() for p in params)
-    if verbose:
+    if verbose and start_epoch == 0:
         print(f"Model parameters: {num_params:,} ({num_params / 1e6:.2f}M)")
 
     # Paper: AdamW with β1=0.9, β2=0.95, weight_decay=1.0
