@@ -59,6 +59,7 @@ def run_trm_experiment(
     T_train: int = 8,
     T_eval: int = 32,
     N_SUP: int = 16,
+    L_cycles: int = 1,
     lr: float = 1e-4,
     scale_lr: bool = True,
     num_workers: int = 0,
@@ -90,9 +91,10 @@ def run_trm_experiment(
         num_blanks_test: Number of blank cells in test puzzles.
         num_train_samples: Number of training samples.
         num_test_samples: Number of test samples.
-        T_train: Recursion depth during training.
-        T_eval: Recursion depth during evaluation.
+        T_train: Improvement steps during training (H_cycles).
+        T_eval: Improvement steps during evaluation.
         N_SUP: Number of supervision points per batch.
+        L_cycles: Latent updates per improvement step.
         lr: Base learning rate (will be scaled for multi-GPU if scale_lr=True).
         scale_lr: Whether to scale LR with number of GPUs (linear scaling rule).
         num_workers: Number of dataloader workers (0 for auto).
@@ -256,6 +258,7 @@ def run_trm_experiment(
         epochs=num_epochs,
         T=T_train,
         N_SUP=N_SUP,
+        L_cycles=L_cycles,
         lr=effective_lr,
         tracker=None,
         test_loader=test_loader,
@@ -268,7 +271,7 @@ def run_trm_experiment(
     # For evaluation, use unwrapped model
     eval_model = cast(SudokuTRM, unwrap_model(model))
 
-    # Recursion depth ablation
+    # Recursion depth ablation (uses default L_cycles=1 for simplicity)
     print("\nRecursion depth ablation:")
     ablation_results = {}
     for T in [1, 2, 4, 8, 16, 32]:
@@ -683,19 +686,25 @@ def main() -> None:
         "--t-train",
         type=int,
         default=8,
-        help="TRM: recursion steps during training (default: 8)",
+        help="TRM: improvement steps during training / H_cycles (default: 8)",
     )
     parser.add_argument(
         "--t-eval",
         type=int,
         default=32,
-        help="TRM: recursion steps during evaluation (default: 32)",
+        help="TRM: improvement steps during evaluation (default: 32)",
     )
     parser.add_argument(
         "--n-sup",
         type=int,
         default=16,
         help="TRM: supervision points per batch (default: 16)",
+    )
+    parser.add_argument(
+        "--l-cycles",
+        type=int,
+        default=1,
+        help="TRM: latent updates per improvement step / L_cycles (default: 1)",
     )
     parser.add_argument(
         "--cell-embed-dim",
@@ -856,6 +865,7 @@ def main() -> None:
             T_train=args.t_train,
             T_eval=args.t_eval,
             N_SUP=args.n_sup,
+            L_cycles=args.l_cycles,
             scale_lr=scale_lr,
             num_workers=args.num_workers,
             num_train_samples=args.num_train,

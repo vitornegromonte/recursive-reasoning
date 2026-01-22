@@ -11,27 +11,42 @@ def latent_recursion(
     y: torch.Tensor,
     z: torch.Tensor,
     n: int,
+    l_cycles: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Perform n steps of latent recursion.
+    Perform n improvement steps with recursive latent reasoning.
 
-    At each step:
-        z = net(x, y, z)  # reasoning update
-        y = net(y, z)     # solution refinement
+    Per the TRM paper (exact notation):
+    - zL (z) = latent reasoning feature
+    - zH (y) = current embedded solution
+    - fL: zL ← fL(zL + zH + x) — latent update includes x
+    - fH: zH ← fH(zL + zH)    — answer update does NOT include x
+
+    Each improvement step consists of:
+    1. l_cycles latent updates: z ← f(x, y, z)  [contains x]
+    2. One answer update: y ← f(z, y)           [no x]
+
+    The inclusion/exclusion of x tells the network which task to perform:
+    - With x: iterate on latent z
+    - Without x: use z to update answer y
 
     Args:
         net: The recursive operator network.
         x: Input embedding (frozen during recursion).
-        y: Solution state.
-        z: Reasoning state.
-        n: Number of recursion steps.
+        y: Solution state zH (answer/embedded solution).
+        z: Reasoning state zL (latent feature).
+        n: Number of improvement steps (T in training).
+        l_cycles: Number of latent updates per improvement step.
 
     Returns:
         Updated (y, z) states.
     """
     for _ in range(n):
-        z = net(x, y, z)  # reasoning update
-        y = net(y, z)  # solution refinement
+        # fL: zL ← fL(zL + zH + x) — n times (l_cycles latent updates)
+        for _ in range(l_cycles):
+            z = net(x, y, z)  # Contains x → latent reasoning update
+        # fH: zH ← fH(zL + zH) — once (answer update)
+        y = net(z, y)  # No x (c=None→zeros) → solution refinement
     return y, z
 
 
@@ -99,12 +114,13 @@ class TRM(nn.Module):
         z: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Perform a single recursion step.
+        Perform a single improvement step with l_cycles latent updates.
 
         Args:
             x: Input embedding.
             y: Current solution state.
             z: Current reasoning state.
+            l_cycles: Number of latent updates before answer update.
 
         Returns:
             Updated (y, z) states.
@@ -117,14 +133,16 @@ class TRM(nn.Module):
         self,
         x: torch.Tensor,
         T: int,
+        L_cycles: int = 1,
         return_trajectory: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """
-        Run T recursive reasoning steps.
+        Run T improvement steps with L_cycles latent updates each.
 
         Args:
             x: Input tensor.
-            T: Number of recursion steps.
+            T: Number of improvement steps (H_cycles).
+            L_cycles: Number of latent updates per improvement step.
             return_trajectory: If True, returns intermediate latent states.
 
         Returns:
@@ -142,7 +160,11 @@ class TRM(nn.Module):
         trajectory: list[torch.Tensor] = []
 
         for _ in range(T):
-            y, z = self.step(x, y, z)
+            # fL: zL ← fL(zL + zH + x) — L_cycles times
+            for _ in range(L_cycles):
+                z = self.operator(x, y, z)  # Contains x
+            # fH: zH ← fH(zL + zH) — once
+            y = self.operator(z, y)  # No x
             if return_trajectory:
                 trajectory.append(y)
 
@@ -202,13 +224,14 @@ class SudokuTRM(nn.Module):
             num_digits=num_digits,
         )
 
-    def forward(self, x: torch.Tensor, T: int) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, T: int, L_cycles: int = 1) -> torch.Tensor:
         """
-        Solve Sudoku puzzle using T recursion steps.
+        Solve Sudoku puzzle using T improvement steps.
 
         Args:
             x: One-hot encoded puzzle of shape (batch, num_cells, cell_dim).
-            T: Number of recursion steps.
+            T: Number of improvement steps (H_cycles).
+            L_cycles: Number of latent updates per improvement step.
 
         Returns:
             Logits of shape (batch, num_cells, num_digits).
@@ -221,5 +244,5 @@ class SudokuTRM(nn.Module):
         y = torch.zeros(batch_size, x.size(-1), device=device)
         z = torch.zeros_like(y)
 
-        y, z = latent_recursion(self.trm_net, x, y, z, T)
+        y, z = latent_recursion(self.trm_net, x, y, z, n=T, l_cycles=L_cycles)
         return self.output_head(y)

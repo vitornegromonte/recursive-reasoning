@@ -29,6 +29,11 @@ mkdir -p "$CHECKPOINT_DIR"
 # Paper: batch_size=768, hidden=512, N_SUP=16, T=3, n=6
 #        AdamW β1=0.9, β2=0.95, lr=1e-4, weight_decay=1.0
 #        EMA=0.999, warmup=2K iterations, 60K epochs
+#
+# Architecture params:
+#   L_layers=2 (MLP-Mixer layers in operator)
+#   H_cycles=3 (improvement steps = T_TRAIN)
+#   L_cycles=6 (latent updates per improvement step)
 # =============================================================
 
 # Infrastructure (adjust batch size for your GPU memory)
@@ -39,12 +44,13 @@ NUM_TEST=2000
 PUZZLE_SIZE=9
 DATASET="extreme"
 
-# TRM config from paper: T=3, n=6 (supervision steps), hidden=512
+# TRM config from paper
 TRM_DIM=512
 TRM_CELL_EMBED=32
-T_TRAIN=3
-N_SUP=6  # Paper says "n=6" which is supervision steps
-T_EVAL=42  # "Depth 42" from paper table
+T_TRAIN=3       # H_cycles: improvement steps
+L_CYCLES=6      # L_cycles: latent updates per improvement step  
+N_SUP=16        # Supervision points per batch (deep supervision)
+T_EVAL=42       # "Depth 42" from paper table
 
 # Baselines matched to similar param count (~8-10M)
 TRANSFORMER_DIM=320
@@ -121,15 +127,16 @@ run_quick() {
         --t-train $T_TRAIN \
         --t-eval $T_EVAL \
         --n-sup $N_SUP \
+        --l-cycles $L_CYCLES \
         --lr $LR_TRM \
         --puzzle-size $PUZZLE_SIZE \
         --dataset $DATASET \
         --seed 0
 }
 
-# TRM scarcity experiments (~5M params, paper config)
+# TRM scarcity experiments (paper config)
 run_trm() {
-    log "TRM | Data scarcity experiments (T=$T_TRAIN, N_SUP=$N_SUP, ~5M params)"
+    log "TRM | Data scarcity experiments (T=$T_TRAIN, L_cycles=$L_CYCLES, N_SUP=$N_SUP)"
 
     for n in "${DATASETS[@]}"; do
         for seed in "${SEEDS[@]}"; do
@@ -144,6 +151,7 @@ run_trm() {
                 --t-train $T_TRAIN \
                 --t-eval $T_EVAL \
                 --n-sup $N_SUP \
+                --l-cycles $L_CYCLES \
                 --lr $LR_TRM \
                 --puzzle-size $PUZZLE_SIZE \
                 --dataset $DATASET \
@@ -218,6 +226,7 @@ run_trm_recursion_eval() {
                     --t-train $T_TRAIN \
                     --t-eval $depth \
                     --n-sup $N_SUP \
+                    --l-cycles $L_CYCLES \
                     --lr $LR_TRM \
                     --puzzle-size $PUZZLE_SIZE \
                     --dataset $DATASET \

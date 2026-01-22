@@ -29,6 +29,7 @@ def train_sudoku_trm(
     epochs: int = 1,
     T: int = 8,
     N_SUP: int = 16,
+    L_cycles: int = 1,
     lr: float = 1e-4,
     weight_decay: float = 1.0,
     ema_decay: float = 0.999,
@@ -42,11 +43,17 @@ def train_sudoku_trm(
     """
     Train a Sudoku TRM model with deep supervision.
 
-    Uses the characteristic TRM training scheme:
-    1. Run T-1 recursion steps WITHOUT gradients
-    2. Run 1 final step WITH gradients
+    TRM paper architecture parameters:
+    - T (H_cycles): Number of improvement steps per supervision point.
+      Each improvement step = L_cycles latent updates + 1 answer update.
+    - L_cycles: Number of latent z updates per improvement step.
+    - N_SUP: Number of supervision points (deep supervision).
+
+    Training scheme:
+    1. Run T-1 improvement steps WITHOUT gradients
+    2. Run 1 final improvement step WITH gradients
     3. Compute loss and backpropagate
-    4. Repeat N_SUP times before optimizer step
+    4. Repeat N_SUP times per batch
 
     Supports DataParallel wrapped models for multi-GPU training.
 
@@ -55,8 +62,9 @@ def train_sudoku_trm(
         dataloader: Training data loader.
         device: Device to train on.
         epochs: Number of training epochs.
-        T: Number of recursion steps per supervision.
+        T: Number of improvement steps per supervision (H_cycles in paper).
         N_SUP: Number of supervision points per batch.
+        L_cycles: Number of latent updates per improvement step (paper default: 1).
         lr: Learning rate.
         weight_decay: Weight decay for AdamW (paper uses 1.0).
         ema_decay: Decay factor for exponential moving average (paper uses 0.999).
@@ -64,7 +72,7 @@ def train_sudoku_trm(
         verbose: Whether to print progress.
         tracker: Optional experiment tracker for logging and checkpoints.
         test_loader: Optional test data loader for validation.
-        T_eval: Number of recursion steps for evaluation.
+        T_eval: Number of improvement steps for evaluation.
         start_epoch: Starting epoch number for display (default 0).
     """
     # Get the underlying model for accessing submodules
@@ -97,10 +105,22 @@ def train_sudoku_trm(
     ema_trm = EMA(base_model.trm_net, decay=ema_decay)
     ema_head = EMA(base_model.output_head, decay=ema_decay)
 
-    # Learning rate warmup scheduler (paper: 2K iterations)
+    # Learning rate warmup scheduler
+    # Paper uses 2K iterations with batch_size=768 on full dataset
+    # Scale warmup based on actual steps per epoch for small datasets
+    num_batches = len(dataloader)
+    steps_per_epoch = num_batches * N_SUP  # Each batch has N_SUP optimizer steps
+    total_steps = epochs * steps_per_epoch
+
+    # Use 10% of training as warmup, capped at 2000 steps
+    effective_warmup = min(warmup_steps, max(100, total_steps // 10))
+
+    if verbose and start_epoch == 0:
+        print(f"Warmup: {effective_warmup} steps ({effective_warmup / steps_per_epoch:.1f} epochs)")
+
     def lr_lambda(step: int) -> float:
-        if step < warmup_steps:
-            return step / warmup_steps
+        if step < effective_warmup:
+            return step / effective_warmup
         return 1.0
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
@@ -136,13 +156,18 @@ def train_sudoku_trm(
             z = torch.zeros_like(y)
 
             for _ in range(N_SUP):
-                # Run T-1 steps without gradients
+                # Run T-1 improvement steps without gradients
+                # Each improvement step = L_cycles latent updates + 1 answer update
                 with torch.no_grad():
-                    y, z = latent_recursion(base_model.trm_net, x, y, z, T - 1)
+                    y, z = latent_recursion(
+                        base_model.trm_net, x, y, z, n=T - 1, l_cycles=L_cycles
+                    )
 
-                # Final step with gradients
+                # Final improvement step with gradients
                 optimizer.zero_grad()
-                y, z = latent_recursion(base_model.trm_net, x, y, z, 1)
+                y, z = latent_recursion(
+                    base_model.trm_net, x, y, z, n=1, l_cycles=L_cycles
+                )
 
                 # Compute loss
                 logits = base_model.output_head(y)
@@ -213,6 +238,7 @@ def evaluate_trm(
     dataloader: DataLoader,
     device: torch.device,
     T: int = 32,
+    L_cycles: int = 1,
 ) -> float:
     """
     Evaluate a TRM model on a dataset.
@@ -221,7 +247,8 @@ def evaluate_trm(
         model: The SudokuTRM model to evaluate.
         dataloader: Evaluation data loader.
         device: Device to evaluate on.
-        T: Number of recursion steps for evaluation.
+        T: Number of improvement steps for evaluation.
+        L_cycles: Number of latent updates per improvement step.
 
     Returns:
         Accuracy as a float between 0 and 1.
@@ -245,8 +272,8 @@ def evaluate_trm(
         y = torch.zeros(batch_size, dim, device=device)
         z = torch.zeros_like(y)
 
-        # Run recursion
-        y, z = latent_recursion(model.trm_net, x, y, z, T)
+        # Run recursion with L_cycles latent updates per improvement step
+        y, z = latent_recursion(model.trm_net, x, y, z, n=T, l_cycles=L_cycles)
         logits = model.output_head(y)
 
         # Compute accuracy
