@@ -51,6 +51,7 @@ def run_trm_experiment(
     device_info: DeviceInfo,
     puzzle_size: int = 4,
     trm_dim: int = 128,
+    cell_embed_dim: int = 32,
     num_epochs: int = 20,
     batch_size: int = 64,
     num_blanks_train: int = 6,
@@ -199,6 +200,7 @@ def run_trm_experiment(
     model = SudokuTRM(
         trm_dim=trm_dim,
         cell_dim=cell_dim,
+        cell_embed_dim=cell_embed_dim,
         num_cells=num_cells,
         num_digits=num_digits,
     )
@@ -708,6 +710,54 @@ def main() -> None:
         help="Model dimension (default: 128)",
     )
 
+    # TRM-specific parameters
+    parser.add_argument(
+        "--t-train",
+        type=int,
+        default=8,
+        help="TRM: recursion steps during training (default: 8)",
+    )
+    parser.add_argument(
+        "--t-eval",
+        type=int,
+        default=32,
+        help="TRM: recursion steps during evaluation (default: 32)",
+    )
+    parser.add_argument(
+        "--n-sup",
+        type=int,
+        default=16,
+        help="TRM: supervision points per batch (default: 16)",
+    )
+    parser.add_argument(
+        "--cell-embed-dim",
+        type=int,
+        default=32,
+        help="TRM: cell embedding dimension (default: 32)",
+    )
+
+    # Transformer-specific parameters
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=6,
+        help="Transformer/LSTM: number of layers (default: 6)",
+    )
+    parser.add_argument(
+        "--d-ff",
+        type=int,
+        default=256,
+        help="Transformer: feedforward hidden dimension (default: 256)",
+    )
+
+    # LSTM-specific parameters
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=None,
+        help="LSTM: hidden state size (default: same as --dim)",
+    )
+
     # Data parameters
     parser.add_argument(
         "--puzzle-size",
@@ -831,9 +881,13 @@ def main() -> None:
             device_info=device_info,
             puzzle_size=args.puzzle_size,
             trm_dim=args.dim,
+            cell_embed_dim=args.cell_embed_dim,
             num_epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr,
+            T_train=args.t_train,
+            T_eval=args.t_eval,
+            N_SUP=args.n_sup,
             scale_lr=scale_lr,
             num_workers=args.num_workers,
             num_train_samples=args.num_train,
@@ -856,6 +910,8 @@ def main() -> None:
             device_info=device_info,
             puzzle_size=args.puzzle_size,
             d_model=args.dim,
+            depth=args.depth,
+            d_ff=args.d_ff,
             num_epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr * 3,  # Transformer typically uses higher LR
@@ -874,10 +930,13 @@ def main() -> None:
 
     if args.model in ("lstm", "all"):
         print("\nLSTM EXPERIMENT\n")
+        lstm_hidden = args.hidden_size if args.hidden_size else args.dim
         run_lstm_experiment(
             device_info=device_info,
             puzzle_size=args.puzzle_size,
             d_model=args.dim,
+            hidden_size=lstm_hidden,
+            num_layers=args.depth,
             num_epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr * 3,  # LSTM typically uses higher LR like Transformer

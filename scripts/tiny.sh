@@ -24,20 +24,44 @@ CHECKPOINT_DIR="checkpoints"
 mkdir -p "$LOG_DIR"
 mkdir -p "$CHECKPOINT_DIR"
 
-# Workshop-locked configuration
-BATCH_SIZE=64
-DIM=128
+# =============================================================
+# TRM Paper Configuration (Sudoku-Extreme)
+# Paper: batch_size=768, hidden=512, N_SUP=16, T=3, n=6
+#        AdamW β1=0.9, β2=0.95, lr=1e-4, weight_decay=1.0
+#        EMA=0.999, warmup=2K iterations, 60K epochs
+# =============================================================
+
+# Infrastructure (adjust batch size for your GPU memory)
+# Paper uses batch_size=768 on L40S (40GB)
+# Reduce for smaller GPUs (e.g., 256 for 16GB, 128 for 8GB)
+BATCH_SIZE=768
 NUM_TEST=2000
 PUZZLE_SIZE=9
 DATASET="extreme"
 
-# Data scarcity regimes
+# TRM config from paper: T=3, n=6 (supervision steps), hidden=512
+TRM_DIM=512
+TRM_CELL_EMBED=32
+T_TRAIN=3
+N_SUP=6  # Paper says "n=6" which is supervision steps
+T_EVAL=42  # "Depth 42" from paper table
+
+# Baselines matched to similar param count (~8-10M)
+TRANSFORMER_DIM=320
+TRANSFORMER_DEPTH=8
+TRANSFORMER_DFF=1024
+LSTM_HIDDEN=400
+LSTM_LAYERS=3
+
+# Data scarcity regimes (for workshop experiments)
 DATASETS=(100 300 1000 3000 10000)
 
 # Random seeds
 SEEDS=(0 1 2)
 
-# Epoch schedule (approximate compute normalisation)
+# Epoch schedule
+# Paper uses 60K epochs for full Sudoku-Extreme training
+# Scaled down for data scarcity experiments
 declare -A EPOCHS_MAP=(
   [100]=200
   [300]=150
@@ -46,13 +70,16 @@ declare -A EPOCHS_MAP=(
   [10000]=40
 )
 
-# Learning rates
+# Full paper reproduction (use with --num-train full dataset)
+FULL_EPOCHS=60000
+
+# Learning rates (paper: 1e-4 for all)
 LR_TRM=1e-4
-LR_BASELINE=3e-4
+LR_BASELINE=1e-4
 
 # Workers / infra
 NUM_WORKERS=0
-SCALE_LR=1
+SCALE_LR=0  # Disable LR scaling, paper uses fixed 1e-4
 
 # Utilities
 log() {
@@ -89,30 +116,35 @@ run_quick() {
         --num-train 300 \
         --num-test 200 \
         --batch-size 32 \
-        --dim 64 \
+        --dim $TRM_DIM \
+        --cell-embed-dim $TRM_CELL_EMBED \
+        --t-train $T_TRAIN \
+        --t-eval $T_EVAL \
+        --n-sup $N_SUP \
         --lr $LR_TRM \
         --puzzle-size $PUZZLE_SIZE \
         --dataset $DATASET \
         --seed 0
 }
 
-# Unified scarcity experiments
-run_scarcity_experiments() {
-    local model=$1
-    local lr=$2
-
-    log "$model | Data scarcity experiments"
+# TRM scarcity experiments (~5M params, paper config)
+run_trm() {
+    log "TRM | Data scarcity experiments (T=$T_TRAIN, N_SUP=$N_SUP, ~5M params)"
 
     for n in "${DATASETS[@]}"; do
         for seed in "${SEEDS[@]}"; do
-            run_experiment "${model}-n${n}-seed${seed}" \
-                --model $model \
+            run_experiment "trm-n${n}-seed${seed}" \
+                --model trm \
                 --epochs ${EPOCHS_MAP[$n]} \
                 --num-train $n \
                 --num-test $NUM_TEST \
                 --batch-size $BATCH_SIZE \
-                --dim $DIM \
-                --lr $lr \
+                --dim $TRM_DIM \
+                --cell-embed-dim $TRM_CELL_EMBED \
+                --t-train $T_TRAIN \
+                --t-eval $T_EVAL \
+                --n-sup $N_SUP \
+                --lr $LR_TRM \
                 --puzzle-size $PUZZLE_SIZE \
                 --dataset $DATASET \
                 --seed $seed
@@ -120,23 +152,57 @@ run_scarcity_experiments() {
     done
 }
 
-run_trm() {
-    run_scarcity_experiments "trm" "$LR_TRM"
-}
-
+# Transformer scarcity experiments (~5M params)
 run_transformer() {
-    run_scarcity_experiments "transformer" "$LR_BASELINE"
+    log "Transformer | Data scarcity experiments (depth=$TRANSFORMER_DEPTH, ~5M params)"
+
+    for n in "${DATASETS[@]}"; do
+        for seed in "${SEEDS[@]}"; do
+            run_experiment "transformer-n${n}-seed${seed}" \
+                --model transformer \
+                --epochs ${EPOCHS_MAP[$n]} \
+                --num-train $n \
+                --num-test $NUM_TEST \
+                --batch-size $BATCH_SIZE \
+                --dim $TRANSFORMER_DIM \
+                --depth $TRANSFORMER_DEPTH \
+                --d-ff $TRANSFORMER_DFF \
+                --lr $LR_BASELINE \
+                --puzzle-size $PUZZLE_SIZE \
+                --dataset $DATASET \
+                --seed $seed
+        done
+    done
 }
 
+# LSTM scarcity experiments (~5M params)
 run_lstm() {
-    run_scarcity_experiments "lstm" "$LR_BASELINE"
+    log "LSTM | Data scarcity experiments (hidden=$LSTM_HIDDEN, layers=$LSTM_LAYERS, ~5M params)"
+
+    for n in "${DATASETS[@]}"; do
+        for seed in "${SEEDS[@]}"; do
+            run_experiment "lstm-n${n}-seed${seed}" \
+                --model lstm \
+                --epochs ${EPOCHS_MAP[$n]} \
+                --num-train $n \
+                --num-test $NUM_TEST \
+                --batch-size $BATCH_SIZE \
+                --dim 128 \
+                --hidden-size $LSTM_HIDDEN \
+                --depth $LSTM_LAYERS \
+                --lr $LR_BASELINE \
+                --puzzle-size $PUZZLE_SIZE \
+                --dataset $DATASET \
+                --seed $seed
+        done
+    done
 }
 
 # Inference-time recursion depth scaling (TRM only)
 run_trm_recursion_eval() {
     log "TRM | Inference-time recursion scaling"
 
-    RECURSION_DEPTHS=(1 2 4 8 16 32)
+    RECURSION_DEPTHS=(1 2 4 8 16 32 42)
     EVAL_DATASETS=(300 1000 10000)
 
     for n in "${EVAL_DATASETS[@]}"; do
@@ -147,13 +213,15 @@ run_trm_recursion_eval() {
                     --num-train $n \
                     --num-test $NUM_TEST \
                     --batch-size $BATCH_SIZE \
-                    --dim $DIM \
+                    --dim $TRM_DIM \
+                    --cell-embed-dim $TRM_CELL_EMBED \
+                    --t-train $T_TRAIN \
+                    --t-eval $depth \
+                    --n-sup $N_SUP \
                     --lr $LR_TRM \
                     --puzzle-size $PUZZLE_SIZE \
                     --dataset $DATASET \
-                    --seed $seed \
-                    --eval-recursion-depth $depth \
-                    --eval-only
+                    --seed $seed
             done
         done
     done

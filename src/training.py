@@ -10,7 +10,7 @@ from tqdm import tqdm
 from src.models.lstm import SudokuLSTM
 from src.models.transformer import SudokuTransformer
 from src.models.trm import SudokuTRM, latent_recursion
-from src.models.utils import EMA, AverageMeter
+from src.models.utils import EMA, AverageMeter, StableMaxCrossEntropy
 
 # Import experiment tracking (optional)
 try:
@@ -30,8 +30,9 @@ def train_sudoku_trm(
     T: int = 8,
     N_SUP: int = 16,
     lr: float = 1e-4,
-    weight_decay: float = 1e-4,
+    weight_decay: float = 1.0,
     ema_decay: float = 0.999,
+    warmup_steps: int = 2000,
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
     test_loader: DataLoader | None = None,
@@ -57,8 +58,9 @@ def train_sudoku_trm(
         T: Number of recursion steps per supervision.
         N_SUP: Number of supervision points per batch.
         lr: Learning rate.
-        weight_decay: Weight decay for AdamW.
-        ema_decay: Decay factor for exponential moving average.
+        weight_decay: Weight decay for AdamW (paper uses 1.0).
+        ema_decay: Decay factor for exponential moving average (paper uses 0.999).
+        warmup_steps: Number of warmup iterations (paper uses 2000).
         verbose: Whether to print progress.
         tracker: Optional experiment tracker for logging and checkpoints.
         test_loader: Optional test data loader for validation.
@@ -80,11 +82,29 @@ def train_sudoku_trm(
         + list(base_model.output_head.parameters())
     )
 
-    optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
-    loss_fn = nn.CrossEntropyLoss()
+    # Log parameter count at start
+    num_params = sum(p.numel() for p in params)
+    if verbose:
+        print(f"Model parameters: {num_params:,} ({num_params / 1e6:.2f}M)")
+
+    # Paper: AdamW with β1=0.9, β2=0.95, weight_decay=1.0
+    optimizer = torch.optim.AdamW(
+        params, lr=lr, weight_decay=weight_decay, betas=(0.9, 0.95)
+    )
+    # Paper: stable-max cross-entropy loss
+    loss_fn = StableMaxCrossEntropy()
 
     ema_trm = EMA(base_model.trm_net, decay=ema_decay)
     ema_head = EMA(base_model.output_head, decay=ema_decay)
+
+    # Learning rate warmup scheduler (paper: 2K iterations)
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return step / warmup_steps
+        return 1.0
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    global_step = 0
 
     # Determine starting epoch (for resuming or single-epoch calls)
     epoch_offset = start_epoch
@@ -131,6 +151,8 @@ def train_sudoku_trm(
                 # Backpropagate
                 loss.backward()
                 optimizer.step()
+                scheduler.step()  # LR warmup
+                global_step += 1
 
                 # Update EMA
                 ema_trm.update(base_model.trm_net)
