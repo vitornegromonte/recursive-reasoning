@@ -236,7 +236,6 @@ wandb/
 *.safetensors
 
 # Data files (if generated locally)
-data/
 datasets/
 
 # ===== IDE/Editor =====
