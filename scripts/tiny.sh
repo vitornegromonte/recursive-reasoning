@@ -28,7 +28,8 @@ mkdir -p "$CHECKPOINT_DIR"
 BATCH_SIZE=64
 DIM=128
 NUM_TEST=2000
-PUZZLE_SIZE=4
+PUZZLE_SIZE=9
+DATASET="extreme"
 
 # Data scarcity regimes
 DATASETS=(100 300 1000 3000 10000)
@@ -91,6 +92,7 @@ run_quick() {
         --dim 64 \
         --lr $LR_TRM \
         --puzzle-size $PUZZLE_SIZE \
+        --dataset $DATASET \
         --seed 0
 }
 
@@ -112,6 +114,7 @@ run_scarcity_experiments() {
                 --dim $DIM \
                 --lr $lr \
                 --puzzle-size $PUZZLE_SIZE \
+                --dataset $DATASET \
                 --seed $seed
         done
     done
@@ -147,6 +150,7 @@ run_trm_recursion_eval() {
                     --dim $DIM \
                     --lr $LR_TRM \
                     --puzzle-size $PUZZLE_SIZE \
+                    --dataset $DATASET \
                     --seed $seed \
                     --eval-recursion-depth $depth \
                     --eval-only

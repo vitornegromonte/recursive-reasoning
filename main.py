@@ -14,6 +14,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.data import SudokuDataset
+from src.data.tasks import SudokuExtremeTask, SudokuTaskConfig
 from src.distributed import (
     DeviceInfo,
     get_device_info,
@@ -72,6 +73,8 @@ def run_trm_experiment(
     log_recursion: bool = False,
     log_latent_stats: bool = False,
     seed: int = 42,
+    # Dataset selection
+    dataset: str = "procedural",
 ) -> None:
     """
     Run a complete TRM training and evaluation experiment.
@@ -103,6 +106,7 @@ def run_trm_experiment(
         log_recursion: Whether to log recursion step metrics.
         log_latent_stats: Whether to log latent state statistics.
         seed: Random seed for reproducibility.
+        dataset: Dataset type: 'procedural' or 'extreme' (Sudoku-Extreme 9x9).
     """
     import time
 
@@ -145,16 +149,35 @@ def run_trm_experiment(
     )
 
     # Create datasets
-    train_dataset = SudokuDataset(
-        num_samples=num_train_samples,
-        num_blanks=num_blanks_train,
-        n=puzzle_size,
-    )
-    test_dataset = SudokuDataset(
-        num_samples=num_test_samples,
-        num_blanks=num_blanks_test,
-        n=puzzle_size,
-    )
+    if dataset == "extreme":
+        # Sudoku-Extreme: 9x9 puzzles from HuggingFace
+        if puzzle_size != 9:
+            print(f"Warning: Sudoku-Extreme is 9x9 only. Overriding puzzle_size={puzzle_size} to 9.")
+            puzzle_size = 9
+            num_cells = 81
+            num_digits = 9
+            cell_dim = 10
+
+        task_config = SudokuTaskConfig(
+            train_samples=num_train_samples,
+            test_samples=num_test_samples,
+        )
+        task = SudokuExtremeTask(task_config)
+        train_dataset = task.get_train_dataset()
+        test_dataset = task.get_test_dataset()
+        print(f"Using Sudoku-Extreme dataset: {len(train_dataset)} train, {len(test_dataset)} test")
+    else:
+        # Procedural generation
+        train_dataset = SudokuDataset(
+            num_samples=num_train_samples,
+            num_blanks=num_blanks_train,
+            n=puzzle_size,
+        )
+        test_dataset = SudokuDataset(
+            num_samples=num_test_samples,
+            num_blanks=num_blanks_test,
+            n=puzzle_size,
+        )
 
     train_loader = DataLoader(
         train_dataset,
@@ -329,6 +352,7 @@ def run_transformer_experiment(
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
     resume_from: Path | None = None,
+    dataset: str = "procedural",
 ) -> None:
     """
     Run a complete Transformer baseline experiment.
@@ -395,16 +419,35 @@ def run_transformer_experiment(
     )
 
     # Create datasets
-    train_dataset = SudokuDataset(
-        num_samples=num_train_samples,
-        num_blanks=num_blanks,
-        n=puzzle_size,
-    )
-    test_dataset = SudokuDataset(
-        num_samples=num_test_samples,
-        num_blanks=num_blanks,
-        n=puzzle_size,
-    )
+    if dataset == "extreme":
+        # Sudoku-Extreme: 9x9 puzzles from HuggingFace
+        if puzzle_size != 9:
+            print(f"Warning: Sudoku-Extreme is 9x9 only. Overriding puzzle_size={puzzle_size} to 9.")
+            puzzle_size = 9
+            num_cells = 81
+            num_digits = 9
+            vocab_size = 10
+
+        task_config = SudokuTaskConfig(
+            train_samples=num_train_samples,
+            test_samples=num_test_samples,
+        )
+        task = SudokuExtremeTask(task_config)
+        train_dataset = task.get_train_dataset()
+        test_dataset = task.get_test_dataset()
+        print(f"Using Sudoku-Extreme dataset: {len(train_dataset)} train, {len(test_dataset)} test")
+    else:
+        # Procedural generation
+        train_dataset = SudokuDataset(
+            num_samples=num_train_samples,
+            num_blanks=num_blanks,
+            n=puzzle_size,
+        )
+        test_dataset = SudokuDataset(
+            num_samples=num_test_samples,
+            num_blanks=num_blanks,
+            n=puzzle_size,
+        )
 
     train_loader = DataLoader(
         train_dataset,
@@ -478,6 +521,7 @@ def run_lstm_experiment(
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
     resume_from: Path | None = None,
+    dataset: str = "procedural",
 ) -> None:
     """
     Run a complete LSTM baseline experiment.
@@ -542,16 +586,35 @@ def run_lstm_experiment(
     )
 
     # Create datasets
-    train_dataset = SudokuDataset(
-        num_samples=num_train_samples,
-        num_blanks=num_blanks,
-        n=puzzle_size,
-    )
-    test_dataset = SudokuDataset(
-        num_samples=num_test_samples,
-        num_blanks=num_blanks,
-        n=puzzle_size,
-    )
+    if dataset == "extreme":
+        # Sudoku-Extreme: 9x9 puzzles from HuggingFace
+        if puzzle_size != 9:
+            print(f"Warning: Sudoku-Extreme is 9x9 only. Overriding puzzle_size={puzzle_size} to 9.")
+            puzzle_size = 9
+            num_cells = 81
+            num_digits = 9
+            vocab_size = 10
+
+        task_config = SudokuTaskConfig(
+            train_samples=num_train_samples,
+            test_samples=num_test_samples,
+        )
+        task = SudokuExtremeTask(task_config)
+        train_dataset = task.get_train_dataset()
+        test_dataset = task.get_test_dataset()
+        print(f"Using Sudoku-Extreme dataset: {len(train_dataset)} train, {len(test_dataset)} test")
+    else:
+        # Procedural generation
+        train_dataset = SudokuDataset(
+            num_samples=num_train_samples,
+            num_blanks=num_blanks,
+            n=puzzle_size,
+        )
+        test_dataset = SudokuDataset(
+            num_samples=num_test_samples,
+            num_blanks=num_blanks,
+            n=puzzle_size,
+        )
 
     train_loader = DataLoader(
         train_dataset,
@@ -652,6 +715,13 @@ def main() -> None:
         default=4,
         choices=[4, 9, 16],
         help="Sudoku puzzle size: 4 (4x4), 9 (9x9), or 16 (16x16) (default: 4)",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="procedural",
+        choices=["procedural", "extreme"],
+        help="Dataset: 'procedural' (generated) or 'extreme' (HuggingFace 9x9) (default: procedural)",
     )
     parser.add_argument(
         "--num-train",
@@ -777,6 +847,7 @@ def main() -> None:
             log_recursion=args.log_recursion,
             log_latent_stats=args.log_latent_stats,
             seed=args.seed,
+            dataset=args.dataset,
         )
 
     if args.model in ("transformer", "all"):
@@ -798,6 +869,7 @@ def main() -> None:
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir,
             resume_from=resume_from,
+            dataset=args.dataset,
         )
 
     if args.model in ("lstm", "all"):
@@ -819,6 +891,7 @@ def main() -> None:
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir,
             resume_from=resume_from,
+            dataset=args.dataset,
         )
 
 
