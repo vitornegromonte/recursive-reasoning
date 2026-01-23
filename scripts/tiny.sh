@@ -133,7 +133,7 @@ run_experiment() {
     log "Starting experiment: $name"
     log "Args: ${args[*]}"
 
-    local cmd="uv run python main.py ${args[*]}"
+    local cmd="python main.py ${args[*]}"
     cmd="$cmd --log-dir $LOG_DIR --checkpoint-dir $CHECKPOINT_DIR"
     cmd="$cmd --num-workers $NUM_WORKERS"
     [[ $SCALE_LR -eq 0 ]] && cmd="$cmd --no-scale-lr"
@@ -281,10 +281,10 @@ main() {
 
     log "Project root: $PROJECT_ROOT"
     log "Experiment: $experiment"
-    log "Device: $(uv run python - <<EOF
+    log "Device: $(python - <<'PY'
 import torch
 print("cuda" if torch.cuda.is_available() else "cpu")
-EOF
+PY
 )"
     echo ""
 
