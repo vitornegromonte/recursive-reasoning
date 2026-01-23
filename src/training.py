@@ -39,10 +39,8 @@ def train_sudoku_trm(
     test_loader: DataLoader | None = None,
     T_eval: int = 32,
     start_epoch: int = 0,
-) -> None:
     use_amp: bool = False,
     early_stopping_patience: int = 10,
-) -> None:
 ) -> None:
     """
     Train a Sudoku TRM model with deep supervision.
@@ -324,10 +322,8 @@ def train_transformer(
     weight_decay: float = 1e-4,
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
-) -> None:
     use_amp: bool = False,
     early_stopping_patience: int = 10,
-) -> None:
 ) -> None:
     """
     Train a Transformer model on Sudoku.
@@ -496,10 +492,8 @@ def train_lstm(
     weight_decay: float = 1e-4,
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
-) -> None:
     use_amp: bool = False,
     early_stopping_patience: int = 10,
-) -> None:
 ) -> None:
     """
     Train an LSTM model on Sudoku.
