@@ -27,22 +27,28 @@ mkdir -p "$CHECKPOINT_DIR"
 # TRM Paper Configuration (Sudoku-Extreme)
 # Paper: batch_size=768, hidden=512, N_SUP=16, T=3, n=6
 #        AdamW β1=0.9, β2=0.95, lr=1e-4, weight_decay=1.0
-#        EMA=0.999, warmup=2K iterations, 60K epochs
+#        EMA=0.999, warmup=2K iterations, 60K epochs on 1M samples
 #
 # Architecture params:
 #   L_layers=2 (MLP-Mixer layers in operator)
 #   H_cycles=3 (improvement steps = T_TRAIN)
 #   L_cycles=6 (latent updates per improvement step)
 #
+# Scaling logic:
+#   Paper: 1M samples × 60K epochs = 60B sample exposures
+#   Paper: ~1.25B gradient steps (with N_SUP=16)
+#   
+#   For data scarcity, we target ~1M gradient steps per experiment
+#   (0.1% of paper's compute, but sufficient for convergence)
+#   
+#   Formula: epochs = target_steps / (samples / batch_size) / N_SUP
+#
 # Model sizes (~5M params each for fair comparison):
 #   TRM:         dim=368, cell_embed=48 → 5.01M
 #   Transformer: dim=288, depth=8, d_ff=512 → 5.07M
 #   LSTM:        hidden=288, layers=3 → 4.97M
 
-# Infrastructure (adjust batch size for your GPU memory)
-# Paper uses batch_size=768 on L40S (40GB)
-# Reduce for smaller GPUs (e.g., 256 for 16GB, 128 for 8GB)
-BATCH_SIZE=768
+# Infrastructure
 NUM_TEST=2000
 PUZZLE_SIZE=9
 DATASET="extreme"
@@ -56,37 +62,58 @@ N_SUP=6         # Supervision points per batch
 T_EVAL=42       # "Depth 42" from paper table
 
 # Transformer baseline (~5.07M params)
+# Matched: same input/output structure, learned positional embeddings
 TRANSFORMER_DIM=288
 TRANSFORMER_DEPTH=8
+TRANSFORMER_HEADS=8
 TRANSFORMER_DFF=512
 
 # LSTM baseline (~4.97M params)
-LSTM_HIDDEN=288
+# Matched: same embedding dim, bidirectional for global context
+LSTM_DIM=128        # Embedding dimension (same as input projection)
+LSTM_HIDDEN=288     # Hidden size
 LSTM_LAYERS=3
 
-# Data scarcity regimes (for workshop experiments)
-DATASETS=(100 300 1000 3000 10000)
+# Data scarcity regimes (shifted up from 100-10K to 1K-100K)
+# These represent 0.1% to 10% of the original 1M dataset
+DATASETS=(1000 3000 10000 30000 100000)
 
 # Random seeds
 SEEDS=(0 1 2)
 
+# Batch sizes per dataset (scale down for small datasets to get more steps/epoch)
+# Rule: batch = min(768, dataset // 2) but at least 64
+declare -A BATCH_MAP=(
+  [1000]=256
+  [3000]=512
+  [10000]=768
+  [30000]=768
+  [100000]=768
+)
+
 # Epoch schedule
-# Paper uses 60K epochs for full Sudoku-Extreme training
-# Scaled down for data scarcity experiments
+# Target: ~500K-1M gradient steps per experiment
+# Steps = epochs × (samples / batch) × N_SUP
+# Solved: epochs = target_steps / (samples / batch) / N_SUP
+#
+# With N_SUP=6 and target ~600K steps:
 declare -A EPOCHS_MAP=(
-  [100]=200
-  [300]=150
-  [1000]=100
-  [3000]=60
-  [10000]=40
+  [1000]=10000    # 10K × (1K/256) × 6 = 234K steps
+  [3000]=6000     # 6K × (3K/512) × 6 = 211K steps  
+  [10000]=3000    # 3K × (10K/768) × 6 = 234K steps
+  [30000]=1500    # 1.5K × (30K/768) × 6 = 351K steps
+  [100000]=600    # 600 × (100K/768) × 6 = 469K steps
 )
 
 # Full paper reproduction (use with --num-train full dataset)
 FULL_EPOCHS=60000
 
-# Learning rates (paper: 1e-4 for all)
+# Learning rates
+# TRM: paper uses 1e-4
+# Baselines: typically benefit from slightly higher LR, but we keep same for fairness
 LR_TRM=1e-4
-LR_BASELINE=1e-4
+LR_TRANSFORMER=1e-4
+LR_LSTM=1e-4
 
 # Workers / infra
 NUM_WORKERS=0
@@ -146,13 +173,14 @@ run_trm() {
     log "TRM | Data scarcity experiments (T=$T_TRAIN, L_cycles=$L_CYCLES, N_SUP=$N_SUP)"
 
     for n in "${DATASETS[@]}"; do
+        local batch=${BATCH_MAP[$n]}
         for seed in "${SEEDS[@]}"; do
             run_experiment "trm-n${n}-seed${seed}" \
                 --model trm \
                 --epochs ${EPOCHS_MAP[$n]} \
                 --num-train $n \
                 --num-test $NUM_TEST \
-                --batch-size $BATCH_SIZE \
+                --batch-size $batch \
                 --dim $TRM_DIM \
                 --cell-embed-dim $TRM_CELL_EMBED \
                 --t-train $T_TRAIN \
@@ -169,20 +197,21 @@ run_trm() {
 
 # Transformer scarcity experiments (~5M params)
 run_transformer() {
-    log "Transformer | Data scarcity experiments (depth=$TRANSFORMER_DEPTH, ~5M params)"
+    log "Transformer | Data scarcity experiments (dim=$TRANSFORMER_DIM, depth=$TRANSFORMER_DEPTH, ~5M params)"
 
     for n in "${DATASETS[@]}"; do
+        local batch=${BATCH_MAP[$n]}
         for seed in "${SEEDS[@]}"; do
             run_experiment "transformer-n${n}-seed${seed}" \
                 --model transformer \
                 --epochs ${EPOCHS_MAP[$n]} \
                 --num-train $n \
                 --num-test $NUM_TEST \
-                --batch-size $BATCH_SIZE \
+                --batch-size $batch \
                 --dim $TRANSFORMER_DIM \
                 --depth $TRANSFORMER_DEPTH \
                 --d-ff $TRANSFORMER_DFF \
-                --lr $LR_BASELINE \
+                --lr $LR_TRANSFORMER \
                 --puzzle-size $PUZZLE_SIZE \
                 --dataset $DATASET \
                 --seed $seed
@@ -192,20 +221,21 @@ run_transformer() {
 
 # LSTM scarcity experiments (~5M params)
 run_lstm() {
-    log "LSTM | Data scarcity experiments (hidden=$LSTM_HIDDEN, layers=$LSTM_LAYERS, ~5M params)"
+    log "LSTM | Data scarcity experiments (dim=$LSTM_DIM, hidden=$LSTM_HIDDEN, layers=$LSTM_LAYERS, ~5M params)"
 
     for n in "${DATASETS[@]}"; do
+        local batch=${BATCH_MAP[$n]}
         for seed in "${SEEDS[@]}"; do
             run_experiment "lstm-n${n}-seed${seed}" \
                 --model lstm \
                 --epochs ${EPOCHS_MAP[$n]} \
                 --num-train $n \
                 --num-test $NUM_TEST \
-                --batch-size $BATCH_SIZE \
-                --dim 128 \
+                --batch-size $batch \
+                --dim $LSTM_DIM \
                 --hidden-size $LSTM_HIDDEN \
                 --depth $LSTM_LAYERS \
-                --lr $LR_BASELINE \
+                --lr $LR_LSTM \
                 --puzzle-size $PUZZLE_SIZE \
                 --dataset $DATASET \
                 --seed $seed
@@ -218,16 +248,18 @@ run_trm_recursion_eval() {
     log "TRM | Inference-time recursion scaling"
 
     RECURSION_DEPTHS=(1 2 4 8 16 32 42)
-    EVAL_DATASETS=(300 1000 10000)
+    EVAL_DATASETS=(3000 10000 100000)
 
     for n in "${EVAL_DATASETS[@]}"; do
+        local batch=${BATCH_MAP[$n]}
         for seed in "${SEEDS[@]}"; do
             for depth in "${RECURSION_DEPTHS[@]}"; do
                 run_experiment "trm-recursion-n${n}-d${depth}-seed${seed}" \
                     --model trm \
+                    --epochs ${EPOCHS_MAP[$n]} \
                     --num-train $n \
                     --num-test $NUM_TEST \
-                    --batch-size $BATCH_SIZE \
+                    --batch-size $batch \
                     --dim $TRM_DIM \
                     --cell-embed-dim $TRM_CELL_EMBED \
                     --t-train $T_TRAIN \

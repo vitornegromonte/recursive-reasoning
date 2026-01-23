@@ -36,16 +36,18 @@ class HPOConfig:
 
     # Search space
     model_type: Literal["trm", "transformer", "lstm"] = "trm"
-    puzzle_size: int = 4
+    puzzle_size: int = 9  # Default to 9x9 Sudoku-Extreme
 
     # Data settings
     num_train_samples: int = 10_000  # Smaller for faster trials
     num_test_samples: int = 2_000
     num_blanks: int = 6
+    dataset: str = "extreme"  # "procedural" or "extreme"
 
     # Training settings (fixed during HPO)
-    num_epochs: int = 5  # Fewer epochs for faster trials
+    num_epochs: int = 10  # More epochs for better signal
     early_stopping_patience: int = 3
+    use_amp: bool = True  # Enable AMP for faster trials
 
     # Optuna settings
     n_trials: int = 50
@@ -58,29 +60,37 @@ class HPOConfig:
 
     # Pruning
     use_pruning: bool = True
-    pruning_warmup_epochs: int = 2
+    pruning_warmup_epochs: int = 3
 
-    # Search space bounds
+    # Target parameter budget (~5M params)
+    target_params: int = 5_000_000
+    param_tolerance: float = 0.2  # Allow ±20% deviation
+
+    # Search space bounds (updated for ~5M param budget)
     search_space: dict[str, Any] = field(default_factory=lambda: {
         # Common parameters
-        "batch_size": {"type": "categorical", "choices": [32, 64, 128]},
-        "lr": {"type": "log_uniform", "low": 1e-5, "high": 1e-2},
-        "weight_decay": {"type": "log_uniform", "low": 1e-6, "high": 1e-2},
-        "dim": {"type": "categorical", "choices": [64, 128, 256]},
+        "batch_size": {"type": "categorical", "choices": [256, 512, 768]},
+        "lr": {"type": "log_uniform", "low": 1e-5, "high": 1e-3},
+        "weight_decay": {"type": "log_uniform", "low": 0.1, "high": 2.0},
 
-        # TRM-specific
-        "T_train": {"type": "int", "low": 4, "high": 16},
-        "N_SUP": {"type": "categorical", "choices": [8, 16, 32]},
+        # TRM-specific (~5M: dim=368, cell_embed=48)
+        "trm_dim": {"type": "categorical", "choices": [320, 368, 416]},
+        "cell_embed_dim": {"type": "categorical", "choices": [32, 48, 64]},
+        "T_train": {"type": "categorical", "choices": [2, 3, 4]},
+        "L_cycles": {"type": "categorical", "choices": [4, 6, 8]},
+        "N_SUP": {"type": "categorical", "choices": [4, 6, 8]},
 
-        # Transformer-specific
-        "depth": {"type": "int", "low": 2, "high": 8},
-        "n_heads": {"type": "categorical", "choices": [2, 4, 8]},
-        "d_ff_mult": {"type": "categorical", "choices": [2, 4]},
-        "dropout": {"type": "uniform", "low": 0.0, "high": 0.3},
+        # Transformer-specific (~5M: dim=288, depth=8, d_ff=512)
+        "transformer_dim": {"type": "categorical", "choices": [256, 288, 320]},
+        "depth": {"type": "categorical", "choices": [6, 8, 10]},
+        "n_heads": {"type": "categorical", "choices": [4, 8]},
+        "d_ff": {"type": "categorical", "choices": [384, 512, 640]},
+        "dropout": {"type": "uniform", "low": 0.0, "high": 0.2},
 
-        # LSTM-specific
-        "num_layers": {"type": "int", "low": 1, "high": 4},
-        "hidden_size_mult": {"type": "categorical", "choices": [1, 2]},
+        # LSTM-specific (~5M: dim=128, hidden=288, layers=3)
+        "lstm_dim": {"type": "categorical", "choices": [96, 128, 160]},
+        "hidden_size": {"type": "categorical", "choices": [256, 288, 320]},
+        "num_layers": {"type": "categorical", "choices": [2, 3, 4]},
     })
 
 
@@ -108,8 +118,9 @@ def create_trm_objective(
     if not OPTUNA_AVAILABLE:
         raise ImportError("Optuna is not installed. Install with: uv sync --extra hpopt")
 
+    from src.data.tasks.sudoku import SudokuExtremeDataset
     from src.models.trm import latent_recursion
-    from src.models.utils import EMA
+    from src.models.utils import EMA, StableMaxCrossEntropy
 
     device = device_info.device
     puzzle_size = config.puzzle_size
@@ -117,17 +128,31 @@ def create_trm_objective(
     num_digits = puzzle_size
     cell_dim = puzzle_size + 1
 
-    # Create datasets once
-    train_dataset = SudokuDataset(
-        num_samples=config.num_train_samples,
-        num_blanks=config.num_blanks,
-        n=puzzle_size,
-    )
-    test_dataset = SudokuDataset(
-        num_samples=config.num_test_samples,
-        num_blanks=config.num_blanks,
-        n=puzzle_size,
-    )
+    # Create datasets once (use Sudoku-Extreme for 9x9)
+    if config.dataset == "extreme" and puzzle_size == 9:
+        train_dataset = SudokuExtremeDataset(
+            num_samples=config.num_train_samples,
+            split="train",
+        )
+        test_dataset = SudokuExtremeDataset(
+            num_samples=config.num_test_samples,
+            split="test",
+        )
+    else:
+        train_dataset = SudokuDataset(
+            num_samples=config.num_train_samples,
+            num_blanks=config.num_blanks,
+            n=puzzle_size,
+        )
+        test_dataset = SudokuDataset(
+            num_samples=config.num_test_samples,
+            num_blanks=config.num_blanks,
+            n=puzzle_size,
+        )
+
+    # AMP setup
+    scaler = torch.amp.GradScaler(enabled=config.use_amp)
+    autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=config.use_amp)
 
     def objective(trial: Trial) -> float:
         # Suggest hyperparameters
@@ -135,8 +160,10 @@ def create_trm_objective(
         batch_size = _suggest_param(trial, "batch_size", ss["batch_size"])
         lr = _suggest_param(trial, "lr", ss["lr"])
         weight_decay = _suggest_param(trial, "weight_decay", ss["weight_decay"])
-        dim = _suggest_param(trial, "dim", ss["dim"])
+        dim = _suggest_param(trial, "trm_dim", ss["trm_dim"])
+        cell_embed_dim = _suggest_param(trial, "cell_embed_dim", ss["cell_embed_dim"])
         T_train = _suggest_param(trial, "T_train", ss["T_train"])
+        L_cycles = _suggest_param(trial, "L_cycles", ss["L_cycles"])
         N_SUP = _suggest_param(trial, "N_SUP", ss["N_SUP"])
 
         effective_batch_size = get_effective_batch_size(batch_size, device_info)
@@ -162,9 +189,19 @@ def create_trm_objective(
         model = SudokuTRM(
             trm_dim=dim,
             cell_dim=cell_dim,
+            cell_embed_dim=cell_embed_dim,
             num_cells=num_cells,
             num_digits=num_digits,
         )
+
+        # Check parameter count
+        num_params = sum(p.numel() for p in model.parameters())
+        min_params = config.target_params * (1 - config.param_tolerance)
+        max_params = config.target_params * (1 + config.param_tolerance)
+        if not (min_params <= num_params <= max_params):
+            # Prune trials outside param budget
+            raise optuna.TrialPruned(f"Params {num_params/1e6:.2f}M outside budget")
+
         model = wrap_model_for_multi_gpu(model, device_info)
         base_model: SudokuTRM = model.module if isinstance(model, nn.DataParallel) else model  # type: ignore[assignment]
 
@@ -174,8 +211,10 @@ def create_trm_objective(
             + list(base_model.trm_net.parameters())
             + list(base_model.output_head.parameters())
         )
-        optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
-        loss_fn = nn.CrossEntropyLoss()
+        optimizer = torch.optim.AdamW(
+            params, lr=lr, weight_decay=weight_decay, betas=(0.9, 0.95)
+        )
+        loss_fn = StableMaxCrossEntropy()
         ema_trm = EMA(base_model.trm_net, decay=0.999)
         ema_head = EMA(base_model.output_head, decay=0.999)
 
@@ -199,14 +238,21 @@ def create_trm_objective(
 
                 for _ in range(N_SUP):
                     with torch.no_grad():
-                        y, z = latent_recursion(base_model.trm_net, x, y, z, T_train - 1)
+                        y, z = latent_recursion(
+                            base_model.trm_net, x, y, z, T_train - 1, l_cycles=L_cycles
+                        )
 
                     optimizer.zero_grad()
-                    y, z = latent_recursion(base_model.trm_net, x, y, z, 1)
-                    logits = base_model.output_head(y)
-                    loss = loss_fn(logits.view(-1, logits.size(-1)), y_target.view(-1))
-                    loss.backward()
-                    optimizer.step()
+                    with autocast_ctx:
+                        y, z = latent_recursion(
+                            base_model.trm_net, x, y, z, 1, l_cycles=L_cycles
+                        )
+                        logits = base_model.output_head(y)
+                        loss = loss_fn(logits.view(-1, logits.size(-1)), y_target.view(-1))
+
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
 
                     ema_trm.update(base_model.trm_net)
                     ema_head.update(base_model.output_head)
@@ -231,7 +277,9 @@ def create_trm_objective(
                     x = base_model.embed(x_raw)
                     y = torch.zeros(batch_sz, x.size(-1), device=device)
                     z = torch.zeros_like(y)
-                    y, z = latent_recursion(base_model.trm_net, x, y, z, 32)
+                    y, z = latent_recursion(
+                        base_model.trm_net, x, y, z, 32, l_cycles=L_cycles
+                    )
                     logits = base_model.output_head(y)
                     preds = logits.argmax(dim=-1)
                     correct += (preds == y_target).sum().item()
@@ -266,23 +314,39 @@ def create_transformer_objective(
     if not OPTUNA_AVAILABLE:
         raise ImportError("Optuna is not installed. Install with: uv sync --extra hpopt")
 
+    from src.data.tasks.sudoku import SudokuExtremeDataset
+
     device = device_info.device
     puzzle_size = config.puzzle_size
     num_cells = puzzle_size * puzzle_size
     num_digits = puzzle_size
     vocab_size = puzzle_size + 1
 
-    # Create datasets once
-    train_dataset = SudokuDataset(
-        num_samples=config.num_train_samples,
-        num_blanks=config.num_blanks,
-        n=puzzle_size,
-    )
-    test_dataset = SudokuDataset(
-        num_samples=config.num_test_samples,
-        num_blanks=config.num_blanks,
-        n=puzzle_size,
-    )
+    # Create datasets once (use Sudoku-Extreme for 9x9)
+    if config.dataset == "extreme" and puzzle_size == 9:
+        train_dataset = SudokuExtremeDataset(
+            num_samples=config.num_train_samples,
+            split="train",
+        )
+        test_dataset = SudokuExtremeDataset(
+            num_samples=config.num_test_samples,
+            split="test",
+        )
+    else:
+        train_dataset = SudokuDataset(
+            num_samples=config.num_train_samples,
+            num_blanks=config.num_blanks,
+            n=puzzle_size,
+        )
+        test_dataset = SudokuDataset(
+            num_samples=config.num_test_samples,
+            num_blanks=config.num_blanks,
+            n=puzzle_size,
+        )
+
+    # AMP setup
+    scaler = torch.amp.GradScaler(enabled=config.use_amp)
+    autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=config.use_amp)
 
     def objective(trial: Trial) -> float:
         # Suggest hyperparameters
@@ -290,13 +354,12 @@ def create_transformer_objective(
         batch_size = _suggest_param(trial, "batch_size", ss["batch_size"])
         lr = _suggest_param(trial, "lr", ss["lr"])
         weight_decay = _suggest_param(trial, "weight_decay", ss["weight_decay"])
-        dim = _suggest_param(trial, "dim", ss["dim"])
+        dim = _suggest_param(trial, "transformer_dim", ss["transformer_dim"])
         depth = _suggest_param(trial, "depth", ss["depth"])
         n_heads = _suggest_param(trial, "n_heads", ss["n_heads"])
-        d_ff_mult = _suggest_param(trial, "d_ff_mult", ss["d_ff_mult"])
+        d_ff = _suggest_param(trial, "d_ff", ss["d_ff"])
         dropout = _suggest_param(trial, "dropout", ss["dropout"])
 
-        d_ff = dim * d_ff_mult
         effective_batch_size = get_effective_batch_size(batch_size, device_info)
 
         # Create data loaders
@@ -326,10 +389,20 @@ def create_transformer_objective(
             num_digits=num_digits,
             dropout=dropout,
         )
+
+        # Check parameter count
+        num_params = sum(p.numel() for p in model.parameters())
+        min_params = config.target_params * (1 - config.param_tolerance)
+        max_params = config.target_params * (1 + config.param_tolerance)
+        if not (min_params <= num_params <= max_params):
+            raise optuna.TrialPruned(f"Params {num_params/1e6:.2f}M outside budget")
+
         model = wrap_model_for_multi_gpu(model, device_info)
         base_model: SudokuTransformer = model.module if isinstance(model, nn.DataParallel) else model  # type: ignore[assignment]
 
-        optimizer = torch.optim.AdamW(base_model.parameters(), lr=lr, weight_decay=weight_decay)
+        optimizer = torch.optim.AdamW(
+            base_model.parameters(), lr=lr, weight_decay=weight_decay, betas=(0.9, 0.95)
+        )
         loss_fn = nn.CrossEntropyLoss()
 
         best_acc = 0.0
@@ -344,10 +417,13 @@ def create_transformer_objective(
                 y = y.to(device)
 
                 optimizer.zero_grad()
-                logits = model(x)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
-                loss.backward()
-                optimizer.step()
+                with autocast_ctx:
+                    logits = model(x)
+                    loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
+
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 loss_meter.update(loss.item())
 
             # Evaluate
@@ -392,23 +468,39 @@ def create_lstm_objective(
     if not OPTUNA_AVAILABLE:
         raise ImportError("Optuna is not installed. Install with: uv sync --extra hpopt")
 
+    from src.data.tasks.sudoku import SudokuExtremeDataset
+
     device = device_info.device
     puzzle_size = config.puzzle_size
     num_cells = puzzle_size * puzzle_size
     num_digits = puzzle_size
     vocab_size = puzzle_size + 1
 
-    # Create datasets once
-    train_dataset = SudokuDataset(
-        num_samples=config.num_train_samples,
-        num_blanks=config.num_blanks,
-        n=puzzle_size,
-    )
-    test_dataset = SudokuDataset(
-        num_samples=config.num_test_samples,
-        num_blanks=config.num_blanks,
-        n=puzzle_size,
-    )
+    # Create datasets once (use Sudoku-Extreme for 9x9)
+    if config.dataset == "extreme" and puzzle_size == 9:
+        train_dataset = SudokuExtremeDataset(
+            num_samples=config.num_train_samples,
+            split="train",
+        )
+        test_dataset = SudokuExtremeDataset(
+            num_samples=config.num_test_samples,
+            split="test",
+        )
+    else:
+        train_dataset = SudokuDataset(
+            num_samples=config.num_train_samples,
+            num_blanks=config.num_blanks,
+            n=puzzle_size,
+        )
+        test_dataset = SudokuDataset(
+            num_samples=config.num_test_samples,
+            num_blanks=config.num_blanks,
+            n=puzzle_size,
+        )
+
+    # AMP setup
+    scaler = torch.amp.GradScaler(enabled=config.use_amp)
+    autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=config.use_amp)
 
     def objective(trial: Trial) -> float:
         # Suggest hyperparameters
@@ -416,12 +508,11 @@ def create_lstm_objective(
         batch_size = _suggest_param(trial, "batch_size", ss["batch_size"])
         lr = _suggest_param(trial, "lr", ss["lr"])
         weight_decay = _suggest_param(trial, "weight_decay", ss["weight_decay"])
-        dim = _suggest_param(trial, "dim", ss["dim"])
+        dim = _suggest_param(trial, "lstm_dim", ss["lstm_dim"])
+        hidden_size = _suggest_param(trial, "hidden_size", ss["hidden_size"])
         num_layers = _suggest_param(trial, "num_layers", ss["num_layers"])
-        hidden_size_mult = _suggest_param(trial, "hidden_size_mult", ss["hidden_size_mult"])
         dropout = _suggest_param(trial, "dropout", ss["dropout"])
 
-        hidden_size = dim * hidden_size_mult
         effective_batch_size = get_effective_batch_size(batch_size, device_info)
 
         # Create data loaders
@@ -450,10 +541,20 @@ def create_lstm_objective(
             num_digits=num_digits,
             dropout=dropout,
         )
+
+        # Check parameter count
+        num_params = sum(p.numel() for p in model.parameters())
+        min_params = config.target_params * (1 - config.param_tolerance)
+        max_params = config.target_params * (1 + config.param_tolerance)
+        if not (min_params <= num_params <= max_params):
+            raise optuna.TrialPruned(f"Params {num_params/1e6:.2f}M outside budget")
+
         model = wrap_model_for_multi_gpu(model, device_info)
         base_model: SudokuLSTM = model.module if isinstance(model, nn.DataParallel) else model  # type: ignore[assignment]
 
-        optimizer = torch.optim.AdamW(base_model.parameters(), lr=lr, weight_decay=weight_decay)
+        optimizer = torch.optim.AdamW(
+            base_model.parameters(), lr=lr, weight_decay=weight_decay, betas=(0.9, 0.95)
+        )
         loss_fn = nn.CrossEntropyLoss()
 
         best_acc = 0.0
@@ -468,10 +569,13 @@ def create_lstm_objective(
                 y = y.to(device)
 
                 optimizer.zero_grad()
-                logits = model(x)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
-                loss.backward()
-                optimizer.step()
+                with autocast_ctx:
+                    logits = model(x)
+                    loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
+
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 loss_meter.update(loss.item())
 
             # Evaluate

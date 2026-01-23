@@ -3,8 +3,12 @@
 Hyperparameter optimization script for Recursive-Reasoning.
 
 Usage:
-    uv run python scripts/run_hpo.py --model trm --n-trials 50
-    uv run python scripts/run_hpo.py --model transformer --n-trials 100 --storage sqlite:///hpo.db
+    uv run python scripts/run_hpo.py --model trm --n-trials 30
+    uv run python scripts/run_hpo.py --model transformer --n-trials 30
+    uv run python scripts/run_hpo.py --model lstm --n-trials 30
+    uv run python scripts/run_hpo.py --model trm --n-trials 50 --storage sqlite:///hpo.db
+
+All models are constrained to ~5M parameters for fair comparison.
 """
 
 import argparse
@@ -16,7 +20,7 @@ from src.hpo import HPOConfig, run_hpo, save_best_config
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Hyperparameter optimization for Recursive-Reasoning models"
+        description="Hyperparameter optimization for Recursive-Reasoning models (~5M params)"
     )
 
     # Model selection
@@ -32,9 +36,16 @@ def main() -> None:
     parser.add_argument(
         "--puzzle-size",
         type=int,
-        default=4,
-        choices=[4, 9, 16],
-        help="Sudoku puzzle size (default: 4)",
+        default=9,
+        choices=[4, 9],
+        help="Sudoku puzzle size (default: 9 for Sudoku-Extreme)",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="extreme",
+        choices=["procedural", "extreme"],
+        help="Dataset type (default: extreme)",
     )
 
     # Data settings
@@ -55,14 +66,14 @@ def main() -> None:
     parser.add_argument(
         "--n-trials",
         type=int,
-        default=50,
-        help="Number of Optuna trials (default: 50)",
+        default=30,
+        help="Number of Optuna trials (default: 30)",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=5,
-        help="Number of epochs per trial (default: 5)",
+        default=10,
+        help="Number of epochs per trial (default: 10)",
     )
     parser.add_argument(
         "--timeout",
@@ -81,6 +92,27 @@ def main() -> None:
         type=str,
         default=None,
         help="Optuna storage URL, e.g., sqlite:///hpo.db (default: None, in-memory)",
+    )
+
+    # Parameter budget
+    parser.add_argument(
+        "--target-params",
+        type=int,
+        default=5_000_000,
+        help="Target parameter count (default: 5M)",
+    )
+    parser.add_argument(
+        "--param-tolerance",
+        type=float,
+        default=0.2,
+        help="Allowed deviation from target params (default: 0.2 = ±20%%)",
+    )
+
+    # AMP
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="Disable automatic mixed precision",
     )
 
     # Pruning
@@ -109,6 +141,7 @@ def main() -> None:
     config = HPOConfig(
         model_type=args.model,
         puzzle_size=args.puzzle_size,
+        dataset=args.dataset,
         num_train_samples=args.num_train,
         num_test_samples=args.num_test,
         num_epochs=args.epochs,
@@ -117,11 +150,17 @@ def main() -> None:
         study_name=study_name,
         storage=args.storage,
         use_pruning=not args.no_pruning,
+        use_amp=not args.no_amp,
+        target_params=args.target_params,
+        param_tolerance=args.param_tolerance,
     )
 
     # Run HPO
     print("\n" + "=" * 60)
     print(f"HYPERPARAMETER OPTIMIZATION: {args.model.upper()}")
+    print(f"Target parameters: {args.target_params / 1e6:.1f}M (±{args.param_tolerance * 100:.0f}%)")
+    print(f"Dataset: {args.dataset} ({args.puzzle_size}x{args.puzzle_size})")
+    print(f"AMP: {'enabled' if not args.no_amp else 'disabled'}")
     print("=" * 60 + "\n")
 
     results = run_hpo(config, device_info, verbose=True)
@@ -129,6 +168,10 @@ def main() -> None:
     # Save best config
     output_path = Path(args.output) if args.output else Path(f"configs/best_{args.model}.yaml")
     save_best_config(results, args.model, output_path)
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
