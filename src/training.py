@@ -40,7 +40,6 @@ def train_sudoku_trm(
     T_eval: int = 32,
     start_epoch: int = 0,
     use_amp: bool = False,
-    early_stopping_patience: int = 10,
 ) -> None:
     """
     Train a Sudoku TRM model with deep supervision.
@@ -144,14 +143,7 @@ def train_sudoku_trm(
     # Determine log frequency
     log_every = 100 if tracker is None else tracker.config.log_every
 
-    best_val_acc = None
-    epochs_no_improve = 0
-    stop_training = False
     for epoch in range(epochs):
-        if stop_training:
-            if verbose:
-                print(f"Early stopping at epoch {actual_epoch + 1}")
-            break
         actual_epoch = epoch_offset + epoch
         loss_meter = AverageMeter()
         batch_count = 0
@@ -229,15 +221,6 @@ def train_sudoku_trm(
             ema_head.apply(base_model.output_head)
 
             val_acc = evaluate_trm(base_model, test_loader, device, T=T_eval)
-
-            # Early stopping logic
-            if best_val_acc is None or val_acc > best_val_acc:
-                best_val_acc = val_acc
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= early_stopping_patience:
-                    stop_training = True
 
         if tracker is not None:
             tracker.log_epoch(
@@ -323,7 +306,6 @@ def train_transformer(
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
     use_amp: bool = False,
-    early_stopping_patience: int = 10,
 ) -> None:
     """
     Train a Transformer model on Sudoku.
@@ -373,14 +355,7 @@ def train_transformer(
     # Determine log frequency
     log_every = 100 if tracker is None else tracker.config.log_every
 
-    best_val_acc = None
-    epochs_no_improve = 0
-    stop_training = False
     for epoch in range(start_epoch, num_epochs):
-        if stop_training:
-            if verbose:
-                print(f"Early stopping at epoch {epoch}")
-            break
         model.train()
         loss_meter = AverageMeter()
 
@@ -419,15 +394,6 @@ def train_transformer(
         val_acc = None
         if test_loader is not None:
             val_acc = evaluate_transformer(base_model, test_loader, device)
-
-            # Early stopping logic
-            if best_val_acc is None or val_acc > best_val_acc:
-                best_val_acc = val_acc
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= early_stopping_patience:
-                    stop_training = True
 
         if tracker is not None:
             tracker.log_epoch(
@@ -493,7 +459,6 @@ def train_lstm(
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
     use_amp: bool = False,
-    early_stopping_patience: int = 10,
 ) -> None:
     """
     Train an LSTM model on Sudoku.
@@ -543,14 +508,7 @@ def train_lstm(
     # Determine log frequency
     log_every = 100 if tracker is None else tracker.config.log_every
 
-    best_val_acc = None
-    epochs_no_improve = 0
-    stop_training = False
     for epoch in range(start_epoch, num_epochs):
-        if stop_training:
-            if verbose:
-                print(f"Early stopping at epoch {epoch}")
-            break
         model.train()
         loss_meter = AverageMeter()
 
@@ -589,15 +547,6 @@ def train_lstm(
         val_acc = None
         if test_loader is not None:
             val_acc = evaluate_lstm(base_model, test_loader, device)
-
-            # Early stopping logic
-            if best_val_acc is None or val_acc > best_val_acc:
-                best_val_acc = val_acc
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= early_stopping_patience:
-                    stop_training = True
 
         if tracker is not None:
             tracker.log_epoch(
