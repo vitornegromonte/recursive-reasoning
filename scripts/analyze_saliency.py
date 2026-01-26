@@ -255,11 +255,11 @@ def main():
         
         if i == 0:
             # Visualize first one
-            print(f"Target Cell: {target} ({target//9}, {target%9})")
+            print(f"Target Cell: {target} ({target//args.puzzle_size}, {target%args.puzzle_size})")
             print(f"Mass on Peers: {mass_ratio:.4f}")
             # Save heatmap
             plt.figure(figsize=(8, 6))
-            sns.heatmap(smap.reshape(9, 9), cmap="magma")
+            sns.heatmap(smap.reshape(args.puzzle_size, args.puzzle_size), cmap="magma")
             plt.title(f"{args.model.upper()} Saliency for Cell {target}\nConstraint Mass: {mass_ratio:.2%}")
             plt.savefig(f"saliency_{args.model}.png")
             print(f"Saved saliency_{args.model}.png")

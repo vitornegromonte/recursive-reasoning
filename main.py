@@ -261,7 +261,7 @@ def run_trm_experiment(
         N_SUP=N_SUP,
         L_cycles=L_cycles,
         lr=effective_lr,
-        tracker=None,
+        tracker=tracker,
         test_loader=test_loader,
         T_eval=T_eval,
         start_epoch=0,
@@ -276,7 +276,7 @@ def run_trm_experiment(
     # Recursion depth ablation (uses default L_cycles=1 for simplicity)
     print("\nRecursion depth ablation:")
     ablation_results = {}
-    for T in [1, 2, 4, 8, 16, 32]:
+    for T in [1, 2, 4, 8, 16, 32, 42, 64]:
         acc_T = evaluate_trm(
             model=eval_model,
             dataloader=test_loader,

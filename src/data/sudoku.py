@@ -110,17 +110,27 @@ def generate_sudoku_sample(num_blanks: int, n: int = 4) -> tuple[np.ndarray, np.
 
 
 class SudokuDataset(Dataset):
-    def __init__(self, num_samples: int, num_blanks: int, n: int = 4):
+    def __init__(self, num_samples: int, num_blanks: int, n: int = 4, seed: int | None = None):
         self.num_samples = num_samples
         self.num_blanks = num_blanks
         self.n = n
+        self.seed = seed
+        # Set seed for reproducibility if provided
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
 
     def __len__(self) -> int:
         return self.num_samples
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        # For reproducibility, set seed based on index if global seed was set
+        if self.seed is not None:
+            random.seed(self.seed + index)
+            np.random.seed(self.seed + index)
         x, y = generate_sudoku_sample(self.num_blanks, n=self.n)
         return (
             torch.tensor(x, dtype=torch.float32),
             torch.tensor(y, dtype=torch.long)
         )
+

@@ -12,6 +12,7 @@ from src.models import (
     SudokuTransformer,
     TinyTRMMLP,
 )
+from src.models.lstm import SudokuLSTM, SudokuDeepLSTM
 from src.models.trm import SudokuTRM, latent_recursion
 
 
@@ -279,3 +280,69 @@ class TestOutputHead:
 
         out = head(x)
         assert out.shape == (4, 10)
+
+
+class TestSudokuLSTM:
+    """Tests for the LSTM baseline model."""
+
+    def test_forward_shape(self):
+        """LSTM should produce correct output shape."""
+        model = SudokuLSTM(d_model=64, hidden_size=64, num_layers=2)
+        x = torch.randn(4, 16, 5)
+
+        out = model(x)
+        assert out.shape == (4, 16, 4)
+
+    def test_different_layers(self):
+        """LSTM should work with different layer counts."""
+        for layers in [1, 2, 3]:
+            model = SudokuLSTM(d_model=64, hidden_size=64, num_layers=layers)
+            x = torch.randn(2, 16, 5)
+
+            out = model(x)
+            assert out.shape == (2, 16, 4)
+
+    def test_gradient_flow(self):
+        """Gradients should flow through LSTM."""
+        model = SudokuLSTM(d_model=64, hidden_size=64, num_layers=2)
+        x = torch.randn(2, 16, 5)
+        target = torch.randint(0, 4, (2, 16))
+
+        out = model(x)
+        loss = torch.nn.functional.cross_entropy(out.view(-1, 4), target.view(-1))
+        loss.backward()
+
+        assert model.lstm.weight_ih_l0.grad is not None
+
+    def test_return_trajectory(self):
+        """LSTM should optionally return trajectory."""
+        model = SudokuLSTM(d_model=64, hidden_size=64, num_layers=2, num_passes=3)
+        x = torch.randn(2, 16, 5)
+
+        out, trajectory = model(x, return_trajectory=True)
+
+        assert out.shape == (2, 16, 4)
+        assert len(trajectory) == 3
+
+
+class TestSudokuDeepLSTM:
+    """Tests for the Deep LSTM with residual connections."""
+
+    def test_forward_shape(self):
+        """DeepLSTM should produce correct output shape."""
+        model = SudokuDeepLSTM(d_model=64, hidden_size=64, num_layers=4)
+        x = torch.randn(4, 16, 5)
+
+        out = model(x)
+        assert out.shape == (4, 16, 4)
+
+    def test_return_trajectory(self):
+        """DeepLSTM should optionally return trajectory."""
+        model = SudokuDeepLSTM(d_model=64, hidden_size=64, num_layers=4)
+        x = torch.randn(2, 16, 5)
+
+        out, trajectory = model(x, return_trajectory=True)
+
+        assert out.shape == (2, 16, 4)
+        assert len(trajectory) == 4
+
