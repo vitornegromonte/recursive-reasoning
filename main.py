@@ -969,7 +969,7 @@ def main() -> None:
             d_ff=args.d_ff,
             num_epochs=args.epochs,
             batch_size=args.batch_size,
-            lr=args.lr * 3,  # Transformer typically uses higher LR
+            lr=args.lr,  # Use same LR as TRM for fair comparison
             scale_lr=scale_lr,
             num_workers=args.num_workers,
             num_train_samples=args.num_train,
@@ -995,7 +995,7 @@ def main() -> None:
             num_layers=args.depth,
             num_epochs=args.epochs,
             batch_size=args.batch_size,
-            lr=args.lr * 3,  # LSTM typically uses higher LR like Transformer
+            lr=args.lr,  # Use same LR as TRM for fair comparison
             scale_lr=scale_lr,
             num_workers=args.num_workers,
             num_train_samples=args.num_train,
