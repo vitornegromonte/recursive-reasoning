@@ -7,6 +7,7 @@ models on the Sudoku task. Supports multi-GPU training via DataParallel.
 """
 
 import argparse
+import json
 from pathlib import Path
 from typing import cast
 
@@ -69,9 +70,9 @@ def run_trm_experiment(
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
     resume_from: Path | None = None,
-    # Mechanistic logging
-    log_recursion: bool = False,
-    log_latent_stats: bool = False,
+    # Mechanistic logging (enabled by default for detailed analysis)
+    log_recursion: bool = True,
+    log_latent_stats: bool = True,
     seed: int = 42,
     # Dataset selection
     dataset: str = "procedural",
@@ -240,9 +241,8 @@ def run_trm_experiment(
 
     model = wrap_model_for_multi_gpu(model, device_info)
 
-    # Note: ExperimentTracker is available for WandB/checkpoint integration
-    # but we use ExperimentLogger for mechanistic logging
-    _ = ExperimentTracker(
+    # Create experiment tracker for checkpointing and logging
+    tracker = ExperimentTracker(
         config=config,
         model=unwrap_model(model),
         resume_from=resume_from,
@@ -286,12 +286,42 @@ def run_trm_experiment(
         ablation_results[f"ablation/T_{T}"] = acc_T
         print(f"  T={T:2d} → acc={acc_T:.4f}")
 
+    # Final evaluation at T_eval
+    final_acc = evaluate_trm(
+        model=eval_model,
+        dataloader=test_loader,
+        device=device,
+        T=T_eval,
+    )
+    print(f"\nFinal test accuracy (T={T_eval}): {final_acc:.4f}")
+
+    # Save results to JSON
+    results = {
+        "final_accuracy": final_acc,
+        "T_eval": T_eval,
+        "ablation": ablation_results,
+        "num_train_samples": num_train_samples,
+        "num_test_samples": num_test_samples,
+        "epochs": num_epochs,
+        "seed": seed,
+        "model_dim": trm_dim,
+    }
+    results_path = tracker.log_dir / "results.json"
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Results saved to: {results_path}")
+
+    # Save final checkpoint
+    tracker.best_metric = final_acc
+    tracker.finish()
+
     # Log ablation results to wandb
     if config.use_wandb:
         try:
             import wandb  # type: ignore[import-not-found]
 
             wandb.log(ablation_results)
+            wandb.log({"final_accuracy": final_acc})
         except ImportError:
             pass
 
@@ -472,6 +502,23 @@ def run_transformer_experiment(
     acc = evaluate_transformer(eval_model, test_loader, device)
     print(f"\nFinal test accuracy: {acc:.4f}")
 
+    # Save results to JSON
+    results = {
+        "final_accuracy": acc,
+        "model": "transformer",
+        "d_model": d_model,
+        "depth": depth,
+        "n_heads": n_heads,
+        "d_ff": d_ff,
+        "num_train_samples": num_train_samples,
+        "num_test_samples": num_test_samples,
+        "epochs": num_epochs,
+    }
+    results_path = tracker.log_dir / "results.json"
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Results saved to: {results_path}")
+
 
 def run_lstm_experiment(
     device_info: DeviceInfo,
@@ -645,6 +692,22 @@ def run_lstm_experiment(
     acc = evaluate_lstm(eval_model, test_loader, device)
     print(f"\nFinal test accuracy: {acc:.4f}")
 
+    # Save results to JSON
+    results = {
+        "final_accuracy": acc,
+        "model": "lstm",
+        "d_model": d_model,
+        "hidden_size": hidden_size,
+        "num_layers": num_layers,
+        "num_train_samples": num_train_samples,
+        "num_test_samples": num_test_samples,
+        "epochs": num_epochs,
+    }
+    results_path = tracker.log_dir / "results.json"
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Results saved to: {results_path}")
+
 
 def main() -> None:
     """Main entry point with CLI argument parsing."""
@@ -698,7 +761,7 @@ def main() -> None:
         "--t-eval",
         type=int,
         default=32,
-        help="TRM: improvement steps during evaluation (default: 32)",
+        help="TRM: improvement steps during evaluation (default: 32). Useful for testing test-time compute scaling.",
     )
     parser.add_argument(
         "--n-sup",
@@ -759,8 +822,8 @@ def main() -> None:
     parser.add_argument(
         "--num-train",
         type=int,
-        default=100_000,
-        help="Number of training samples (default: 100000)",
+        default=10_000,
+        help="Number of training samples (default: 10000)",
     )
     parser.add_argument(
         "--num-test",
@@ -805,12 +868,14 @@ def main() -> None:
     parser.add_argument(
         "--log-recursion",
         action="store_true",
-        help="Log accuracy/loss at each recursion step (TRM only)",
+        default=True,
+        help="Log accuracy/loss at each recursion step (TRM only, default: True)",
     )
     parser.add_argument(
         "--log-latent-stats",
         action="store_true",
-        help="Log latent state statistics for mechanistic analysis (TRM only)",
+        default=True,
+        help="Log latent state statistics for mechanistic analysis (TRM only, default: True)",
     )
     parser.add_argument(
         "--seed",

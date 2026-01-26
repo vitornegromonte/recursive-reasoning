@@ -118,27 +118,38 @@ class SudokuLSTM(nn.Module):
         if num_passes > 1:
             self.pass_proj = nn.Linear(lstm_output_size, d_model)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, return_trajectory: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """
         Process Sudoku puzzle through LSTM.
 
         Args:
             x: One-hot encoded puzzle of shape (batch, grid_size, vocab_size).
+            return_trajectory: If True, return hidden states after each pass.
 
         Returns:
-            Logits of shape (batch, grid_size, num_digits).
+            Logits of shape (batch, grid_size, num_digits), or tuple of
+            (logits, trajectory) if return_trajectory is True.
         """
         h = self.embed(x)
 
+        trajectory: list[torch.Tensor] = []
         # Multiple passes for iterative refinement
         for pass_idx in range(self.num_passes):
             lstm_out, _ = self.lstm(h)
+            if return_trajectory:
+                trajectory.append(lstm_out.detach().clone())
 
             # Project back for next pass (except last pass)
             if pass_idx < self.num_passes - 1:
                 h = self.pass_proj(lstm_out) + h  # Residual connection
 
-        return self.output_head(lstm_out)
+        out = self.output_head(lstm_out)
+
+        if return_trajectory:
+            return out, trajectory
+        return out
 
 
 class SudokuDeepLSTM(nn.Module):
@@ -213,22 +224,33 @@ class SudokuDeepLSTM(nn.Module):
             nn.Linear(lstm_output_size, num_digits),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, return_trajectory: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """
         Process Sudoku puzzle through Deep LSTM with residual connections.
 
         Args:
             x: One-hot encoded puzzle of shape (batch, grid_size, vocab_size).
+            return_trajectory: If True, return hidden states after each layer.
 
         Returns:
-            Logits of shape (batch, grid_size, num_digits).
+            Logits of shape (batch, grid_size, num_digits), or tuple of
+            (logits, trajectory) if return_trajectory is True.
         """
         h = self.embed(x)
         h = self.input_proj(h)
 
+        trajectory: list[torch.Tensor] = []
         # Process through LSTM layers with residual connections
         for lstm, norm in zip(self.lstm_layers, self.layer_norms, strict=True):
             lstm_out, _ = lstm(h)
             h = norm(h + self.dropout(lstm_out))  # Pre-norm residual
+            if return_trajectory:
+                trajectory.append(h.detach().clone())
 
-        return self.output_head(h)
+        out = self.output_head(h)
+
+        if return_trajectory:
+            return out, trajectory
+        return out

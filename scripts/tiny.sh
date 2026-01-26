@@ -24,6 +24,10 @@ CHECKPOINT_DIR="checkpoints"
 mkdir -p "$LOG_DIR"
 mkdir -p "$CHECKPOINT_DIR"
 
+# LIT/RSI Optimized Configuration
+# Focus: 1K - 30K samples (skipping 100K for efficiency)
+
+
 # TRM Paper Configuration (Sudoku-Extreme)
 # Paper: batch_size=768, hidden=512, N_SUP=16, T=3, n=6
 #        AdamW β1=0.9, β2=0.95, lr=1e-4, weight_decay=1.0
@@ -74,9 +78,9 @@ LSTM_DIM=128        # Embedding dimension (same as input projection)
 LSTM_HIDDEN=288     # Hidden size
 LSTM_LAYERS=3
 
-# Data scarcity regimes (shifted up from 100-10K to 1K-100K)
-# These represent 0.1% to 10% of the original 1M dataset
-DATASETS=(1000 3000 10000 30000 100000)
+# Data scarcity regimes (Optimized for LIT/RSI)
+# 100K removed to focus on low-data regime and save compute
+DATASETS=(1000 3000 10000 30000)
 
 # Random seeds
 SEEDS=(0 1 2)
@@ -97,12 +101,12 @@ declare -A BATCH_MAP=(
 # Solved: epochs = target_steps / (samples / batch) / N_SUP
 #
 # With N_SUP=6 and target ~600K steps:
+# With N_SUP=6 and target ~200K+ steps (Optimized):
 declare -A EPOCHS_MAP=(
-  [1000]=10000    # 10K × (1K/256) × 6 = 234K steps
-  [3000]=6000     # 6K × (3K/512) × 6 = 211K steps  
-  [10000]=3000    # 3K × (10K/768) × 6 = 234K steps
-  [30000]=1500    # 1.5K × (30K/768) × 6 = 351K steps
-  [100000]=600    # 600 × (100K/768) × 6 = 469K steps
+  [1000]=10000    # 10K epochs
+  [3000]=6000     # 6K epochs
+  [10000]=3000    # 3K epochs
+  [30000]=1500    # 1.5K epochs
 )
 
 # Full paper reproduction (use with --num-train full dataset)
@@ -136,6 +140,7 @@ run_experiment() {
     local cmd="python3 main.py ${args[*]}"
     cmd="$cmd --log-dir $LOG_DIR --checkpoint-dir $CHECKPOINT_DIR"
     cmd="$cmd --num-workers $NUM_WORKERS"
+    cmd="$cmd --wandb"
     [[ $SCALE_LR -eq 0 ]] && cmd="$cmd --no-scale-lr"
     [[ $USE_AMP -eq 1 ]] && cmd="$cmd --amp"
 
@@ -166,33 +171,6 @@ run_quick() {
         --puzzle-size $PUZZLE_SIZE \
         --dataset $DATASET \
         --seed 0
-}
-
-# TRM scarcity experiments (paper config)
-run_trm() {
-    log "TRM | Data scarcity experiments (T=$T_TRAIN, L_cycles=$L_CYCLES, N_SUP=$N_SUP)"
-
-    for n in "${DATASETS[@]}"; do
-        local batch=${BATCH_MAP[$n]}
-        for seed in "${SEEDS[@]}"; do
-            run_experiment "trm-n${n}-seed${seed}" \
-                --model trm \
-                --epochs ${EPOCHS_MAP[$n]} \
-                --num-train $n \
-                --num-test $NUM_TEST \
-                --batch-size $batch \
-                --dim $TRM_DIM \
-                --cell-embed-dim $TRM_CELL_EMBED \
-                --t-train $T_TRAIN \
-                --t-eval $T_EVAL \
-                --n-sup $N_SUP \
-                --l-cycles $L_CYCLES \
-                --lr $LR_TRM \
-                --puzzle-size $PUZZLE_SIZE \
-                --dataset $DATASET \
-                --seed $seed
-        done
-    done
 }
 
 # Transformer scarcity experiments (~5M params)
@@ -243,35 +221,51 @@ run_lstm() {
     done
 }
 
-# Inference-time recursion depth scaling (TRM only)
-run_trm_recursion_eval() {
-    log "TRM | Inference-time recursion scaling"
+# TRM scarcity experiments (paper config)
+run_trm() {
+    log "TRM | Data scarcity experiments (T=$T_TRAIN, L_cycles=$L_CYCLES, N_SUP=$N_SUP)"
 
-    RECURSION_DEPTHS=(1 2 4 8 16 32 42)
-    EVAL_DATASETS=(3000 10000 100000)
-
-    for n in "${EVAL_DATASETS[@]}"; do
+    for n in "${DATASETS[@]}"; do
         local batch=${BATCH_MAP[$n]}
         for seed in "${SEEDS[@]}"; do
-            for depth in "${RECURSION_DEPTHS[@]}"; do
-                run_experiment "trm-recursion-n${n}-d${depth}-seed${seed}" \
-                    --model trm \
-                    --epochs ${EPOCHS_MAP[$n]} \
-                    --num-train $n \
-                    --num-test $NUM_TEST \
-                    --batch-size $batch \
-                    --dim $TRM_DIM \
-                    --cell-embed-dim $TRM_CELL_EMBED \
-                    --t-train $T_TRAIN \
-                    --t-eval $depth \
-                    --n-sup $N_SUP \
-                    --l-cycles $L_CYCLES \
-                    --lr $LR_TRM \
-                    --puzzle-size $PUZZLE_SIZE \
-                    --dataset $DATASET \
-                    --seed $seed
-            done
+            run_experiment "trm-n${n}-seed${seed}" \
+                --model trm \
+                --epochs ${EPOCHS_MAP[$n]} \
+                --num-train $n \
+                --num-test $NUM_TEST \
+                --batch-size $batch \
+                --dim $TRM_DIM \
+                --cell-embed-dim $TRM_CELL_EMBED \
+                --t-train $T_TRAIN \
+                --t-eval $T_EVAL \
+                --n-sup $N_SUP \
+                --l-cycles $L_CYCLES \
+                --lr $LR_TRM \
+                --puzzle-size $PUZZLE_SIZE \
+                --dataset $DATASET \
+                --seed $seed
         done
+    done
+}
+
+# RSI: Test-time compute scaling (Inference on trained models)
+run_rsi() {
+    log "RSI | Running Test-Time Compute Scaling Analysis"
+    
+    # Run on the largest trained model (30K)
+    local n=30000
+    
+    for seed in "${SEEDS[@]}"; do
+        local ckpt="${CHECKPOINT_DIR}/trm-n${n}-seed${seed}/last.pt"
+        if [[ -f "$ckpt" ]]; then
+            log "Evaluating checkpoint: $ckpt"
+            python3 scripts/evaluate_recursion.py \
+                --checkpoint "$ckpt" \
+                --depths 1 2 4 8 16 32 42 64 \
+                --save-json "${CHECKPOINT_DIR}/trm-n${n}-seed${seed}/rsi_scaling.json"
+        else
+            log "Warning: Checkpoint $ckpt not found. Run 'trm' experiment first."
+        fi
     done
 }
 
@@ -301,18 +295,18 @@ PY
         lstm)
             run_lstm
             ;;
-        recursion)
-            run_trm_recursion_eval
+        rsi)
+            run_rsi
             ;;
         all)
-            run_trm
             run_transformer
             run_lstm
-            run_trm_recursion_eval
+            run_trm
+            run_rsi
             ;;
         *)
             echo "Unknown experiment: $experiment"
-            echo "Available: quick, trm, transformer, lstm, recursion, all"
+            echo "Available: quick, trm, transformer, lstm, rsi, all"
             exit 1
             ;;
     esac

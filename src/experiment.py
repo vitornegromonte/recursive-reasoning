@@ -383,7 +383,7 @@ class ExperimentTracker:
 
     def finish(self) -> None:
         """Finalize the experiment and save final checkpoint."""
-        self.save_checkpoint("final.pt")
+        self.save_checkpoint("last.pt")
 
         if self.config.use_wandb and self.wandb_run is not None:
             wandb.finish()  # type: ignore[union-attr]

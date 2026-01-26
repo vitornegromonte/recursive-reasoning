@@ -159,19 +159,30 @@ class SudokuTransformer(nn.Module):
 
         self.output_head = nn.Linear(d_model, num_digits)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, return_trajectory: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """
         Process Sudoku puzzle through Transformer.
 
         Args:
             x: One-hot encoded puzzle of shape (batch, grid_size, vocab_size).
+            return_trajectory: If True, return hidden states after each layer.
 
         Returns:
-            Logits of shape (batch, grid_size, num_digits).
+            Logits of shape (batch, grid_size, num_digits), or tuple of
+            (logits, trajectory) if return_trajectory is True.
         """
         h = self.embed(x)
 
+        trajectory: list[torch.Tensor] = []
         for block in self.blocks:
             h = block(h)
+            if return_trajectory:
+                trajectory.append(h.detach().clone())
 
-        return self.output_head(h)
+        out = self.output_head(h)
+
+        if return_trajectory:
+            return out, trajectory
+        return out
