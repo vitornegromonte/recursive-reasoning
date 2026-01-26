@@ -301,9 +301,10 @@ class ExperimentTracker:
         if self.config.use_wandb and self.wandb_run is not None:
             wandb.log(metrics, step=self.global_step)  # type: ignore[union-attr]
 
-        # Save periodic checkpoint
-        if (epoch + 1) % self.config.save_every == 0:
-            self.save_checkpoint(f"epoch_{epoch + 1}.pt")
+        # Periodic checkpoints disabled to save disk space
+        # Only best.pt is saved (when val_accuracy improves)
+        # if (epoch + 1) % self.config.save_every == 0:
+        #     self.save_checkpoint(f"epoch_{epoch + 1}.pt")
 
     def save_checkpoint(
         self,
