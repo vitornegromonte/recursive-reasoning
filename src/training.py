@@ -35,7 +35,6 @@ def train_sudoku_trm(
     lr: float = 1e-4,
     weight_decay: float = 1.0,
     ema_decay: float = 0.999,
-    warmup_steps: int = 2000,
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
     test_loader: DataLoader | None = None,
@@ -109,25 +108,6 @@ def train_sudoku_trm(
     ema_trm = EMA(base_model.trm_net, decay=ema_decay)
     ema_head = EMA(base_model.output_head, decay=ema_decay)
 
-    # Learning rate warmup scheduler
-    # Paper uses 2K iterations with batch_size=768 on full dataset
-    # Scale warmup based on actual steps per epoch for small datasets
-    num_batches = len(dataloader)
-    steps_per_epoch = num_batches * N_SUP  # Each batch has N_SUP optimizer steps
-    total_steps = epochs * steps_per_epoch
-
-    # Use 10% of training as warmup, capped at 2000 steps
-    effective_warmup = min(warmup_steps, max(100, total_steps // 10))
-
-    if verbose and start_epoch == 0:
-        print(f"Warmup: {effective_warmup} steps ({effective_warmup / steps_per_epoch:.1f} epochs)")
-
-    def lr_lambda(step: int) -> float:
-        if step < effective_warmup:
-            return step / effective_warmup
-        return 1.0
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     global_step = 0
 
     # Mixed precision setup
@@ -189,7 +169,6 @@ def train_sudoku_trm(
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step()  # LR warmup
                 global_step += 1
 
                 # Update EMA
@@ -625,7 +604,6 @@ def train_sudoku_trm_v2(
     lr: float = 1e-4,
     weight_decay: float = 1.0,
     ema_decay: float = 0.999,
-    warmup_steps: int = 2000,
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
     test_loader: DataLoader | None = None,
@@ -658,7 +636,6 @@ def train_sudoku_trm_v2(
         lr: Learning rate.
         weight_decay: Weight decay for AdamW.
         ema_decay: Decay factor for exponential moving average.
-        warmup_steps: Number of warmup iterations.
         verbose: Whether to print progress.
         tracker: Optional experiment tracker for logging and checkpoints.
         test_loader: Optional test data loader for validation.
@@ -695,21 +672,6 @@ def train_sudoku_trm_v2(
     ema_trm = EMA(base_model.trm_net, decay=ema_decay)
     ema_head = EMA(base_model.output_head, decay=ema_decay)
 
-    # Learning rate warmup scheduler
-    num_batches = len(dataloader)
-    steps_per_epoch = num_batches * N_SUP
-    total_steps = epochs * steps_per_epoch
-    effective_warmup = min(warmup_steps, max(100, total_steps // 10))
-
-    if verbose and start_epoch == 0:
-        print(f"Warmup: {effective_warmup} steps ({effective_warmup / steps_per_epoch:.1f} epochs)")
-
-    def lr_lambda(step: int) -> float:
-        if step < effective_warmup:
-            return step / effective_warmup
-        return 1.0
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     global_step = 0
 
     # Mixed precision setup
@@ -770,7 +732,6 @@ def train_sudoku_trm_v2(
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step()
                 global_step += 1
 
                 # Update EMA
