@@ -1,7 +1,16 @@
 """Output heads and embedding modules for TRM models."""
 
+import math
+
 import torch
 import torch.nn as nn
+
+
+def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0) -> torch.Tensor:
+    """Truncated normal initialization."""
+    with torch.no_grad():
+        nn.init.trunc_normal_(tensor, std=std, a=-2 * std, b=2 * std)
+    return tensor
 
 
 class OutputHead(nn.Module):
@@ -33,10 +42,10 @@ class OutputHead(nn.Module):
 
 class SudokuEmbedding(nn.Module):
     """
-    Embedding module for Sudoku puzzles.
+    Embedding module for Sudoku puzzles (flat vector output).
 
-    Transforms one-hot encoded puzzle cells into a single latent vector
-    suitable for the TRM architecture.
+    Transforms one-hot encoded puzzle cells into a single latent vector.
+    Used by the old MLP-Mixer based TRM.
     """
 
     def __init__(
@@ -75,11 +84,80 @@ class SudokuEmbedding(nn.Module):
         return self.proj(x)  # (batch, trm_dim)
 
 
+class SudokuSequenceEmbedding(nn.Module):
+    """
+    Embedding module for Sudoku puzzles (sequence output).
+
+    Transforms one-hot encoded puzzle cells into per-cell embeddings,
+    maintaining the sequence structure for Transformer-based TRM.
+
+    Matches the original TinyRecursiveModels architecture.
+    """
+
+    def __init__(
+        self,
+        cell_dim: int = 10,
+        hidden_size: int = 512,
+        num_cells: int = 81,
+        use_learned_pos: bool = True,
+    ):
+        """
+        Initialize the Sudoku sequence embedding.
+
+        Args:
+            cell_dim: Dimension of each cell's one-hot encoding (n+1 for n×n).
+            hidden_size: Output dimension per cell.
+            num_cells: Number of cells in the puzzle (n² for n×n).
+            use_learned_pos: Whether to add learned positional embeddings.
+        """
+        super().__init__()
+        self.num_cells = num_cells
+        self.hidden_size = hidden_size
+        self.use_learned_pos = use_learned_pos
+
+        # Scale factor for embeddings (like original)
+        self.embed_scale = math.sqrt(hidden_size)
+        embed_init_std = 1.0 / self.embed_scale
+
+        # Token embedding: project each cell to hidden_size
+        self.embed_tokens = nn.Linear(cell_dim, hidden_size, bias=False)
+        # Initialize with truncated normal
+        trunc_normal_init_(self.embed_tokens.weight, std=embed_init_std)
+
+        # Learned positional embeddings
+        if use_learned_pos:
+            self.embed_pos = nn.Parameter(
+                trunc_normal_init_(torch.empty(num_cells, hidden_size), std=embed_init_std)
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Embed a batch of Sudoku puzzles.
+
+        Args:
+            x: One-hot encoded puzzles of shape (batch, num_cells, cell_dim).
+
+        Returns:
+            Embedded representation of shape (batch, num_cells, hidden_size).
+        """
+        # Token embedding
+        embedding = self.embed_tokens(x)  # (batch, num_cells, hidden_size)
+
+        # Add positional embedding
+        if self.use_learned_pos:
+            # Scale by 1/sqrt(2) to maintain forward variance (like original)
+            embedding = 0.707106781 * (embedding + self.embed_pos)
+
+        # Scale by sqrt(hidden_size)
+        return self.embed_scale * embedding
+
+
 class SudokuOutputHead(nn.Module):
     """
-    Output head specifically for Sudoku puzzles.
+    Output head for Sudoku puzzles (flat vector input).
 
-    Projects the latent state to per-cell logits for digit classification.
+    Projects flat latent state to per-cell logits for digit classification.
+    Used by the old MLP-Mixer based TRM.
     """
 
     def __init__(
@@ -113,3 +191,39 @@ class SudokuOutputHead(nn.Module):
         """
         logits = self.linear(y)
         return logits.view(-1, self.num_cells, self.num_digits)
+
+
+class SudokuSequenceOutputHead(nn.Module):
+    """
+    Output head for Sudoku puzzles (sequence input).
+
+    Projects per-cell latent states to per-cell logits.
+    Used by the Transformer-based TRM (matches original).
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_digits: int = 9,
+    ):
+        """
+        Initialize the Sudoku sequence output head.
+
+        Args:
+            hidden_size: Input dimension per cell.
+            num_digits: Number of possible digits (n for n×n Sudoku).
+        """
+        super().__init__()
+        self.lm_head = nn.Linear(hidden_size, num_digits, bias=False)
+
+    def forward(self, y: torch.Tensor) -> torch.Tensor:
+        """
+        Project per-cell latent states to digit logits.
+
+        Args:
+            y: Latent state tensor of shape (batch, num_cells, hidden_size).
+
+        Returns:
+            Logits of shape (batch, num_cells, num_digits).
+        """
+        return self.lm_head(y)

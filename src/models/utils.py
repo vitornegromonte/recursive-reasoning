@@ -54,43 +54,60 @@ class EMA:
 
 class StableMaxCrossEntropy(nn.Module):
     """
-    Stable-max cross-entropy loss from the TRM paper.
+    StableMax cross-entropy loss from TinyRecursiveModels.
 
-    Uses a numerically stable formulation that:
-    1. Subtracts the max logit before computing softmax (standard stabilization)
-    2. Adds a small epsilon to prevent log(0)
-    3. Uses label smoothing optionally for better generalization
+    Uses the custom 's' function for numerical stability:
+        s(x) = 1/(1-x+eps) for x < 0
+        s(x) = x + 1       for x >= 0
 
-    This is equivalent to PyTorch's CrossEntropyLoss but with explicit
-    numerical stability handling as described in the TRM paper.
+    This provides a different gradient profile than standard softmax.
     """
 
     def __init__(
         self,
-        label_smoothing: float = 0.0,
         reduction: str = "mean",
-        eps: float = 1e-8,
+        eps: float = 1e-30,
+        ignore_index: int = -100,
     ):
         """
-        Initialize stable-max cross-entropy loss.
+        Initialize stablemax cross-entropy loss.
 
         Args:
-            label_smoothing: Label smoothing factor (0 = no smoothing).
             reduction: How to reduce the loss ('mean', 'sum', 'none').
             eps: Small epsilon for numerical stability.
+            ignore_index: Targets with this value are ignored.
         """
         super().__init__()
-        self.label_smoothing = label_smoothing
         self.reduction = reduction
         self.eps = eps
+        self.ignore_index = ignore_index
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def _s(self, x: torch.Tensor) -> torch.Tensor:
+        """StableMax s function."""
+        return torch.where(
+            x < 0,
+            1 / (1 - x + self.eps),
+            x + 1
+        )
+
+    def _log_stablemax(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        """Log of stablemax normalization."""
+        s_x = self._s(x)
+        return torch.log(s_x / torch.sum(s_x, dim=dim, keepdim=True))
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
-        Compute stable-max cross-entropy loss.
+        Compute stablemax cross-entropy loss.
 
         Args:
             logits: Model predictions of shape (N, C) or (N, ..., C).
             targets: Target class indices of shape (N,) or (N, ...).
+            valid_mask: Optional mask for valid targets.
 
         Returns:
             Loss value (scalar if reduction != 'none').
@@ -99,33 +116,36 @@ class StableMaxCrossEntropy(nn.Module):
         if logits.dim() > 2:
             logits = logits.view(-1, logits.size(-1))
             targets = targets.view(-1)
+            if valid_mask is not None:
+                valid_mask = valid_mask.view(-1)
 
-        # Stable softmax: subtract max for numerical stability
-        logits_max = logits.max(dim=-1, keepdim=True).values
-        logits_stable = logits - logits_max
+        # Compute log probabilities using stablemax (cast to float64 for precision)
+        logprobs = self._log_stablemax(logits.to(torch.float64), dim=-1)
 
-        # Log-softmax with stability
-        log_sum_exp = torch.logsumexp(logits_stable, dim=-1, keepdim=True)
-        log_probs = logits_stable - log_sum_exp
+        # Handle ignore_index
+        if valid_mask is None:
+            valid_mask = (targets != self.ignore_index)
+        
+        # Replace ignored targets with 0 for gather
+        safe_targets = torch.where(valid_mask, targets, 0)
 
         # Gather log probabilities for target classes
-        # targets: (N,) -> (N, 1) for gather
-        target_log_probs = log_probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+        target_logprobs = torch.gather(
+            logprobs,
+            index=safe_targets.to(torch.long).unsqueeze(-1),
+            dim=-1
+        ).squeeze(-1)
 
-        if self.label_smoothing > 0:
-            # Smooth loss: (1 - α) * CE + α * uniform_KL
-            # uniform_KL = -mean(log_probs) = log(num_classes) - mean(logits_stable) + log_sum_exp
-            smooth_loss = -log_probs.mean(dim=-1)
-            loss = (1 - self.label_smoothing) * (-target_log_probs) + self.label_smoothing * smooth_loss
-        else:
-            loss = -target_log_probs
+        # Compute loss (negative log probability)
+        loss = -torch.where(valid_mask, target_logprobs, 0.0)
 
         # Apply reduction
         if self.reduction == "mean":
-            return loss.mean()
+            # Average over valid elements only
+            return loss.sum() / valid_mask.sum().clamp(min=1)
         elif self.reduction == "sum":
             return loss.sum()
-        return loss
+        return loss.to(logits.dtype)
 
 
 class AverageMeter:

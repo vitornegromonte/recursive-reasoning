@@ -4,12 +4,12 @@
 # Focus: Data scarcity + recursion as inductive bias
 #
 # Usage:
-#   ./scripts/run_experiments.sh quick
-#   ./scripts/run_experiments.sh trm
-#   ./scripts/run_experiments.sh transformer
-#   ./scripts/run_experiments.sh lstm
-#   ./scripts/run_experiments.sh recursion
-#   ./scripts/run_experiments.sh all
+#   ./scripts/tiny.sh quick
+#   ./scripts/tiny.sh trm_v2      # New TRMv2 (matches original paper)
+#   ./scripts/tiny.sh trm         # Legacy TRM
+#   ./scripts/tiny.sh transformer
+#   ./scripts/tiny.sh lstm
+#   ./scripts/tiny.sh all
 # ============================================================
 
 set -e  # Exit on error
@@ -24,107 +24,92 @@ CHECKPOINT_DIR="checkpoints"
 mkdir -p "$LOG_DIR"
 mkdir -p "$CHECKPOINT_DIR"
 
-# LIT/RSI Optimized Configuration
-# Focus: 1K - 30K samples (skipping 100K for efficiency)
-
-
-# TRM Paper Configuration (Sudoku-Extreme)
-# Paper: batch_size=768, hidden=512, N_SUP=16, T=3, n=6
-#        AdamW β1=0.9, β2=0.95, lr=1e-4, weight_decay=1.0
-#        EMA=0.999, warmup=2K iterations, 60K epochs on 1M samples
+# ============================================================
+# TRM Paper Configuration (Sudoku-Extreme with mlp_t=True)
+# ============================================================
 #
-# Architecture params:
-#   L_layers=2 (MLP-Mixer layers in operator)
-#   H_cycles=3 (improvement steps = T_TRAIN)
-#   L_cycles=6 (latent updates per improvement step)
+# From original TRM paper (pretrain_mlp_t_sudoku config):
+#   - MLP token mixing, not attention
+#   - No explicit positional encoding in operator
+#   - hidden=512, L_layers=2
+#   - H_cycles=3 (T_TRAIN), L_cycles=6
+#   - batch_size=768, lr=1e-4, weight_decay=1.0
+#   - AdamW β1=0.9, β2=0.95
+#   - EMA=0.999, warmup=2K iterations
 #
-# Scaling logic:
-#   Paper: 1M samples × 60K epochs = 60B sample exposures
-#   Paper: ~1.25B gradient steps (with N_SUP=16)
+# For data scarcity experiments, we scale epochs proportionally.
+#
+# Compute Matching Strategy:
+#   TRMv2 does T*L*2 = 36 operator calls per sample (T=3, L=6)
 #   
-#   For data scarcity, we target ~1M gradient steps per experiment
-#   (0.1% of paper's compute, but sufficient for convergence)
-#   
-#   Formula: epochs = target_steps / (samples / batch_size) / N_SUP
+#   For PARAM matching (~5M params each):
+#     TRMv2:       hidden=630, layers=2 → 5.03M params
+#     Transformer: d=288, depth=8, dff=512 → 5.07M params
+#     LSTM:        embed=128, hidden=288, layers=3 → 4.97M params
 #
-# Model sizes (~5M params each for fair comparison):
-#   TRM:         dim=368, cell_embed=48 → 5.01M
-#   Transformer: dim=288, depth=8, d_ff=512 → 5.07M
-#   LSTM:        hidden=288, layers=3 → 4.97M
+#   Note: TRM's advantage is efficient parameter reuse via recursion.
+#   Matching params (not FLOPs) is the standard from the TRM paper.
 
 # Infrastructure
 NUM_TEST=2000
 PUZZLE_SIZE=9
 DATASET="extreme"
 
-# TRM config (~5.01M params)
+# TRM Config (~5.03M params)
+TRM_V2_DIM=630      # hidden_size
+TRM_V2_HEADS=8      # num_heads (ignored when mlp_t=True)
+TRM_V2_LAYERS=2     # L_layers
+T_TRAIN=3           # H_cycles: improvement steps
+L_CYCLES=6          # L_cycles: latent updates per improvement step
+N_SUP=16            # Supervision points per batch
+T_EVAL=42           # "Depth 42" from paper table
+MLP_T=1             # Use MLP token mixing
+
+# Legacy TRM Config (MLP-Mixer based)
 TRM_DIM=368
 TRM_CELL_EMBED=48
-T_TRAIN=3       # H_cycles: improvement steps
-L_CYCLES=6      # L_cycles: latent updates per improvement step
-N_SUP=6         # Supervision points per batch
-T_EVAL=42       # "Depth 42" from paper table
 
-# Transformer baseline (~5.07M params)
-# Matched: same input/output structure, learned positional embeddings
+# Transformer baseline (~5.07M params, encoder-only)
 TRANSFORMER_DIM=288
 TRANSFORMER_DEPTH=8
 TRANSFORMER_HEADS=8
 TRANSFORMER_DFF=512
 
-# LSTM baseline (~4.97M params)
-# Matched: same embedding dim, bidirectional for global context
-LSTM_DIM=128        # Embedding dimension (same as input projection)
+# LSTM baseline (~4.97M params, bidirectional)
+LSTM_DIM=128        # Embedding dimension
 LSTM_HIDDEN=288     # Hidden size
 LSTM_LAYERS=3
 
-# Data scarcity regimes (Optimized for LIT/RSI)
-# 100K removed to focus on low-data regime and save compute
-DATASETS=(1000 3000 10000 30000)
+# Data scarcity regimes
+DATASETS=(1000 3000 10000)
 
 # Random seeds
-SEEDS=(0 1 2)
+SEEDS=(0)
 
-# Batch sizes per dataset (scale down for small datasets to get more steps/epoch)
-# Rule: batch = min(768, dataset // 2) but at least 64
+# Batch sizes per dataset
 declare -A BATCH_MAP=(
   [1000]=256
   [3000]=512
   [10000]=768
-  [30000]=768
-  [100000]=768
 )
 
-# Epoch schedule
-# Target: ~500K-1M gradient steps per experiment
-# Steps = epochs × (samples / batch) × N_SUP
-# Solved: epochs = target_steps / (samples / batch) / N_SUP
-#
-# With N_SUP=6 and target ~600K steps:
-# With N_SUP=6 and target ~200K+ steps (Optimized):
+# Epoch schedule (scaled for ~500K-1M gradient steps per experiment)
 declare -A EPOCHS_MAP=(
   [1000]=10000    # 10K epochs
   [3000]=6000     # 6K epochs
   [10000]=3000    # 3K epochs
-  [30000]=1500    # 1.5K epochs
 )
 
-# Full paper reproduction (use with --num-train full dataset)
-FULL_EPOCHS=60000
-
 # Learning rates
-# TRM: paper uses 1e-4
-# Baselines: typically benefit from slightly higher LR, but we keep same for fairness
-LR_TRM=1e-4
+LR_TRM=1e-4          # Paper: 1e-4
 LR_TRANSFORMER=1e-4
 LR_LSTM=1e-4
 
 # Workers / infra
 NUM_WORKERS=0
-SCALE_LR=0  # Disable LR scaling, paper uses fixed 1e-4
-USE_AMP=1   # Enable mixed precision (AMP) for faster training
+SCALE_LR=0      # Disable LR scaling, paper uses fixed 1e-4
+USE_AMP=1       # Enable mixed precision (AMP)
 
-# Utilities
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
 }
@@ -151,21 +136,20 @@ run_experiment() {
     echo ""
 }
 
-# Quick sanity check
 run_quick() {
-    log "Quick sanity check"
+    log "Quick sanity check (TRMv2 with mlp_t)"
 
-    run_experiment "quick-trm" \
-        --model trm \
+    run_experiment "quick-trm-v2" \
+        --model trm_v2 \
         --epochs 5 \
         --num-train 300 \
         --num-test 200 \
         --batch-size 32 \
-        --dim $TRM_DIM \
-        --cell-embed-dim $TRM_CELL_EMBED \
+        --dim $TRM_V2_DIM \
+        --depth $TRM_V2_LAYERS \
         --t-train $T_TRAIN \
         --t-eval $T_EVAL \
-        --n-sup $N_SUP \
+        --n-sup 2 \
         --l-cycles $L_CYCLES \
         --lr $LR_TRM \
         --puzzle-size $PUZZLE_SIZE \
@@ -173,9 +157,66 @@ run_quick() {
         --seed 0
 }
 
-# Transformer scarcity experiments (~5M params)
+run_trm_v2() {
+    log "TRMv2 | Data scarcity experiments (mlp_t=True, dim=$TRM_V2_DIM, layers=$TRM_V2_LAYERS)"
+
+    for n in "${DATASETS[@]}"; do
+        local batch=${BATCH_MAP[$n]}
+        for seed in "${SEEDS[@]}"; do
+            local exp_args=(
+                --model trm_v2
+                --epochs ${EPOCHS_MAP[$n]}
+                --num-train $n
+                --num-test $NUM_TEST
+                --batch-size $batch
+                --dim $TRM_V2_DIM
+                --depth $TRM_V2_LAYERS
+                --t-train $T_TRAIN
+                --t-eval $T_EVAL
+                --n-sup $N_SUP
+                --l-cycles $L_CYCLES
+                --lr $LR_TRM
+                --puzzle-size $PUZZLE_SIZE
+                --dataset $DATASET
+                --seed $seed
+            )
+            # MLP token mixing (default True, add --no-mlp-t to use attention)
+            [[ $MLP_T -eq 0 ]] && exp_args+=(--no-mlp-t)
+            
+            run_experiment "trm_v2-n${n}-seed${seed}" "${exp_args[@]}"
+        done
+    done
+}
+
+run_trm_v2_attn() {
+    log "TRMv2 (Attention) | Ablation - using self-attention instead of MLP"
+
+    for n in "${DATASETS[@]}"; do
+        local batch=${BATCH_MAP[$n]}
+        for seed in "${SEEDS[@]}"; do
+            run_experiment "trm_v2_attn-n${n}-seed${seed}" \
+                --model trm_v2 \
+                --epochs ${EPOCHS_MAP[$n]} \
+                --num-train $n \
+                --num-test $NUM_TEST \
+                --batch-size $batch \
+                --dim $TRM_V2_DIM \
+                --depth $TRM_V2_LAYERS \
+                --t-train $T_TRAIN \
+                --t-eval $T_EVAL \
+                --n-sup $N_SUP \
+                --l-cycles $L_CYCLES \
+                --lr $LR_TRM \
+                --puzzle-size $PUZZLE_SIZE \
+                --dataset $DATASET \
+                --no-mlp-t \
+                --seed $seed
+        done
+    done
+}
+
 run_transformer() {
-    log "Transformer | Data scarcity experiments (dim=$TRANSFORMER_DIM, depth=$TRANSFORMER_DEPTH, ~5M params)"
+    log "Transformer | Data scarcity experiments (dim=$TRANSFORMER_DIM, depth=$TRANSFORMER_DEPTH)"
 
     for n in "${DATASETS[@]}"; do
         local batch=${BATCH_MAP[$n]}
@@ -197,9 +238,8 @@ run_transformer() {
     done
 }
 
-# LSTM scarcity experiments (~5M params)
 run_lstm() {
-    log "LSTM | Data scarcity experiments (dim=$LSTM_DIM, hidden=$LSTM_HIDDEN, layers=$LSTM_LAYERS, ~5M params)"
+    log "LSTM | Data scarcity experiments (dim=$LSTM_DIM, hidden=$LSTM_HIDDEN, layers=$LSTM_LAYERS)"
 
     for n in "${DATASETS[@]}"; do
         local batch=${BATCH_MAP[$n]}
@@ -221,9 +261,8 @@ run_lstm() {
     done
 }
 
-# TRM scarcity experiments (paper config)
 run_trm() {
-    log "TRM | Data scarcity experiments (T=$T_TRAIN, L_cycles=$L_CYCLES, N_SUP=$N_SUP)"
+    log "TRM (Legacy) | Data scarcity experiments (T=$T_TRAIN, L_cycles=$L_CYCLES)"
 
     for n in "${DATASETS[@]}"; do
         local batch=${BATCH_MAP[$n]}
@@ -248,34 +287,44 @@ run_trm() {
     done
 }
 
-# RSI: Test-time compute scaling (Inference on trained models)
 run_rsi() {
     log "RSI | Running Test-Time Compute Scaling Analysis"
     
-    # Run on the largest trained model (30K)
     local n=30000
     
     for seed in "${SEEDS[@]}"; do
-        local ckpt="${CHECKPOINT_DIR}/trm-n${n}-seed${seed}/last.pt"
+        # Check TRMv2 checkpoint first
+        local ckpt="${CHECKPOINT_DIR}/trm_v2-n${n}-seed${seed}/last.pt"
         if [[ -f "$ckpt" ]]; then
-            log "Evaluating checkpoint: $ckpt"
+            log "Evaluating TRMv2 checkpoint: $ckpt"
             python3 scripts/evaluate_recursion.py \
                 --checkpoint "$ckpt" \
+                --model trm_v2 \
+                --depths 1 2 4 8 16 32 42 64 \
+                --save-json "${CHECKPOINT_DIR}/trm_v2-n${n}-seed${seed}/rsi_scaling.json"
+        else
+            log "Warning: TRMv2 checkpoint $ckpt not found. Run 'trm_v2' experiment first."
+        fi
+        
+        # Check legacy TRM checkpoint
+        ckpt="${CHECKPOINT_DIR}/trm-n${n}-seed${seed}/last.pt"
+        if [[ -f "$ckpt" ]]; then
+            log "Evaluating TRM checkpoint: $ckpt"
+            python3 scripts/evaluate_recursion.py \
+                --checkpoint "$ckpt" \
+                --model trm \
                 --depths 1 2 4 8 16 32 42 64 \
                 --save-json "${CHECKPOINT_DIR}/trm-n${n}-seed${seed}/rsi_scaling.json"
-        else
-            log "Warning: Checkpoint $ckpt not found. Run 'trm' experiment first."
         fi
     done
 }
 
-# Main
 main() {
     local experiment=${1:-quick}
 
     log "Project root: $PROJECT_ROOT"
     log "Experiment: $experiment"
-    log "Device: $(python - <<'PY'
+    log "Device: $(python3 - <<'PY'
 import torch
 print("cuda" if torch.cuda.is_available() else "cpu")
 PY
@@ -285,6 +334,12 @@ PY
     case $experiment in
         quick)
             run_quick
+            ;;
+        trm_v2)
+            run_trm_v2
+            ;;
+        trm_v2_attn)
+            run_trm_v2_attn
             ;;
         trm)
             run_trm
@@ -299,14 +354,31 @@ PY
             run_rsi
             ;;
         all)
+            run_trm_v2
             run_transformer
             run_lstm
-            run_trm
             run_rsi
+            ;;
+        ablation)
+            # Full ablation: TRMv2 (mlp_t), TRMv2 (attn), Transformer, LSTM
+            run_trm_v2
+            run_trm_v2_attn
+            run_transformer
+            run_lstm
             ;;
         *)
             echo "Unknown experiment: $experiment"
-            echo "Available: quick, trm, transformer, lstm, rsi, all"
+            echo ""
+            echo "Available experiments:"
+            echo "  quick       - Quick sanity check (TRMv2)"
+            echo "  trm_v2      - TRMv2 with MLP token mixing (matches paper)"
+            echo "  trm_v2_attn - TRMv2 with self-attention (ablation)"
+            echo "  trm         - Legacy TRM (MLP-Mixer based)"
+            echo "  transformer - Transformer baseline"
+            echo "  lstm        - LSTM baseline"
+            echo "  rsi         - Test-time compute scaling analysis"
+            echo "  all         - TRMv2 + Transformer + LSTM + RSI"
+            echo "  ablation    - Full ablation (TRMv2, TRMv2_attn, Transformer, LSTM)"
             exit 1
             ;;
     esac

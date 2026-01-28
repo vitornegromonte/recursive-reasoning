@@ -1,6 +1,8 @@
 """Training and evaluation functions for TRM and Transformer models."""
 
-from typing import Optional
+from __future__ import annotations
+
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -596,6 +598,263 @@ def evaluate_lstm(
         preds = logits.argmax(dim=-1)
 
         correct += (preds == y).sum().item()
+        total += preds.numel()
+
+    return correct / total
+
+
+# =============================================================================
+# SudokuTRMv2 Training (Transformer-based operator)
+# =============================================================================
+
+# Import SudokuTRMv2
+try:
+    from src.models.trm import SudokuTRMv2
+except ImportError:
+    SudokuTRMv2 = None  # type: ignore[assignment,misc]
+
+
+def train_sudoku_trm_v2(
+    model: "SudokuTRMv2" | nn.DataParallel,
+    dataloader: DataLoader,
+    device: torch.device,
+    epochs: int = 1,
+    T: int = 8,
+    N_SUP: int = 16,
+    L_cycles: int = 1,
+    lr: float = 1e-4,
+    weight_decay: float = 1.0,
+    ema_decay: float = 0.999,
+    warmup_steps: int = 2000,
+    verbose: bool = True,
+    tracker: Optional["ExperimentTracker"] = None,
+    test_loader: DataLoader | None = None,
+    T_eval: int = 32,
+    start_epoch: int = 0,
+    use_amp: bool = False,
+) -> None:
+    """
+    Train a Sudoku TRM V2 model (Transformer-based) with deep supervision.
+
+    Similar to train_sudoku_trm but for the new architecture with:
+    - Transformer-based operator (self-attention + RoPE)
+    - Sequence-shaped latent states (batch, num_cells, hidden_size)
+    - Learned state initialization
+
+    Training scheme matches the original TinyRecursiveModels:
+    1. Run T-1 improvement steps WITHOUT gradients
+    2. Run 1 final improvement step WITH gradients
+    3. Compute loss and backpropagate
+    4. Repeat N_SUP times per batch
+
+    Args:
+        model: The SudokuTRMv2 model to train (can be DataParallel wrapped).
+        dataloader: Training data loader.
+        device: Device to train on.
+        epochs: Number of training epochs.
+        T: Number of improvement steps per supervision (H_cycles in paper).
+        N_SUP: Number of supervision points per batch.
+        L_cycles: Number of latent updates per improvement step.
+        lr: Learning rate.
+        weight_decay: Weight decay for AdamW.
+        ema_decay: Decay factor for exponential moving average.
+        warmup_steps: Number of warmup iterations.
+        verbose: Whether to print progress.
+        tracker: Optional experiment tracker for logging and checkpoints.
+        test_loader: Optional test data loader for validation.
+        T_eval: Number of improvement steps for evaluation.
+        start_epoch: Starting epoch number for display.
+        use_amp: Whether to use automatic mixed precision.
+    """
+    # Get the underlying model for accessing submodules
+    if isinstance(model, nn.DataParallel):
+        base_model = model.module
+    else:
+        base_model = model
+
+    model.to(device)
+    model.train()
+
+    # Collect parameters (including learned init)
+    params = list(base_model.parameters())
+
+    # Log parameter count at start (only on first epoch)
+    num_params = sum(p.numel() for p in params)
+    if verbose and start_epoch == 0:
+        print(f"Model parameters: {num_params:,} ({num_params / 1e6:.2f}M)")
+
+    # Paper: AdamW with β1=0.9, β2=0.95, weight_decay=1.0
+    optimizer = torch.optim.AdamW(
+        params, lr=lr, weight_decay=weight_decay, betas=(0.9, 0.95)
+    )
+
+    # StableMax cross-entropy loss (matching original)
+    loss_fn = StableMaxCrossEntropy()
+
+    # EMA for operator and output head
+    ema_trm = EMA(base_model.trm_net, decay=ema_decay)
+    ema_head = EMA(base_model.output_head, decay=ema_decay)
+
+    # Learning rate warmup scheduler
+    num_batches = len(dataloader)
+    steps_per_epoch = num_batches * N_SUP
+    total_steps = epochs * steps_per_epoch
+    effective_warmup = min(warmup_steps, max(100, total_steps // 10))
+
+    if verbose and start_epoch == 0:
+        print(f"Warmup: {effective_warmup} steps ({effective_warmup / steps_per_epoch:.1f} epochs)")
+
+    def lr_lambda(step: int) -> float:
+        if step < effective_warmup:
+            return step / effective_warmup
+        return 1.0
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    global_step = 0
+
+    # Mixed precision setup
+    scaler = torch.amp.GradScaler(enabled=use_amp)
+    autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=use_amp)
+
+    if verbose and start_epoch == 0 and use_amp:
+        print("Using automatic mixed precision (AMP)")
+
+    # Determine starting epoch
+    epoch_offset = start_epoch
+    if tracker is not None:
+        epoch_offset = tracker.current_epoch
+
+    log_every = 100 if tracker is None else tracker.config.log_every
+
+    for epoch in range(epochs):
+        actual_epoch = epoch_offset + epoch
+        loss_meter = AverageMeter()
+
+        iterator = tqdm(dataloader, desc=f"Epoch {actual_epoch + 1}") if verbose else dataloader
+
+        for x_raw, y_target in iterator:
+            x_raw = x_raw.to(device)
+            y_target = y_target.to(device)
+
+            batch_size = x_raw.size(0)
+
+            # Embed input once (no gradients needed for embedding)
+            with torch.no_grad():
+                x_emb = base_model.embed(x_raw)  # (batch, num_cells, hidden_size)
+
+            seq_len = x_emb.size(1)
+
+            # Initialize latent states with learned values
+            z_H, z_L = base_model.init_state(batch_size, seq_len, device)
+
+            for _ in range(N_SUP):
+                # Run T-1 improvement steps without gradients
+                with torch.no_grad():
+                    for _ in range(T - 1):
+                        for _ in range(L_cycles):
+                            z_L = base_model.trm_net(x_emb, z_H, z_L)
+                        z_H = base_model.trm_net(z_H, z_L)
+
+                # Final improvement step with gradients
+                optimizer.zero_grad()
+                with autocast_ctx:
+                    for _ in range(L_cycles):
+                        z_L = base_model.trm_net(x_emb, z_H, z_L)
+                    z_H = base_model.trm_net(z_H, z_L)
+
+                    # Compute loss
+                    logits = base_model.output_head(z_H)
+                    loss = loss_fn(logits.view(-1, logits.size(-1)), y_target.view(-1))
+
+                # Backpropagate with gradient scaling
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                global_step += 1
+
+                # Update EMA
+                ema_trm.update(base_model.trm_net)
+                ema_head.update(base_model.output_head)
+
+                loss_meter.update(loss.item())
+
+                # Track step
+                if tracker is not None:
+                    tracker.step()
+                    if tracker.global_step % log_every == 0:
+                        tracker.log_metrics({"loss": loss.item()}, prefix="train")
+
+                # Detach state for next supervision step
+                z_H = z_H.detach()
+                z_L = z_L.detach()
+
+        # End of epoch
+        val_acc = None
+        if test_loader is not None:
+            # Temporarily apply EMA weights for evaluation
+            ema_trm.apply(base_model.trm_net)
+            ema_head.apply(base_model.output_head)
+
+            val_acc = evaluate_trm_v2(base_model, test_loader, device, T=T_eval, L_cycles=L_cycles)
+
+        if tracker is not None:
+            tracker.log_epoch(
+                epoch=actual_epoch + 1,
+                train_loss=loss_meter.avg,
+                val_accuracy=val_acc,
+            )
+        elif verbose:
+            msg = f"Epoch {actual_epoch + 1}: loss = {loss_meter.avg:.4f}"
+            if val_acc is not None:
+                msg += f" | val_acc = {val_acc:.4f}"
+            print(msg)
+
+    # Apply EMA weights for final model
+    ema_trm.apply(base_model.trm_net)
+    ema_head.apply(base_model.output_head)
+
+    if tracker is not None:
+        tracker.finish()
+
+
+@torch.no_grad()
+def evaluate_trm_v2(
+    model: "SudokuTRMv2",
+    dataloader: DataLoader,
+    device: torch.device,
+    T: int = 32,
+    L_cycles: int = 1,
+) -> float:
+    """
+    Evaluate a TRM V2 model on a dataset.
+
+    Args:
+        model: The SudokuTRMv2 model to evaluate.
+        dataloader: Evaluation data loader.
+        device: Device to evaluate on.
+        T: Number of improvement steps for evaluation.
+        L_cycles: Number of latent updates per improvement step.
+
+    Returns:
+        Accuracy as a float between 0 and 1.
+    """
+    model.eval()
+    model.to(device)
+
+    correct = 0
+    total = 0
+
+    for x_raw, y_target in dataloader:
+        x_raw = x_raw.to(device)
+        y_target = y_target.to(device)
+
+        # Forward pass with specified T and L_cycles
+        logits = model(x_raw, T=T, L_cycles=L_cycles)
+
+        # Compute accuracy
+        preds = logits.argmax(dim=-1)
+        correct += (preds == y_target).sum().item()
         total += preds.numel()
 
     return correct / total

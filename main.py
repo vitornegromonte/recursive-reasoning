@@ -35,13 +35,15 @@ from src.logging_utils import (
 )
 from src.models.lstm import SudokuLSTM
 from src.models.transformer import SudokuTransformer
-from src.models.trm import SudokuTRM
+from src.models.trm import SudokuTRM, SudokuTRMv2
 from src.training import (
     evaluate_lstm,
     evaluate_transformer,
     evaluate_trm,
+    evaluate_trm_v2,
     train_lstm,
     train_sudoku_trm,
+    train_sudoku_trm_v2,
     train_transformer,
 )
 
@@ -305,6 +307,256 @@ def run_trm_experiment(
         "epochs": num_epochs,
         "seed": seed,
         "model_dim": trm_dim,
+    }
+    results_path = tracker.log_dir / "results.json"
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Results saved to: {results_path}")
+
+    # Save final checkpoint
+    tracker.best_metric = final_acc
+    tracker.finish()
+
+    # Log ablation results to wandb
+    if config.use_wandb:
+        try:
+            import wandb  # type: ignore[import-not-found]
+
+            wandb.log(ablation_results)
+            wandb.log({"final_accuracy": final_acc})
+        except ImportError:
+            pass
+
+
+def run_trm_v2_experiment(
+    device_info: DeviceInfo,
+    puzzle_size: int = 9,
+    hidden_size: int = 512,
+    num_heads: int = 8,
+    num_layers: int = 2,
+    num_epochs: int = 20,
+    batch_size: int = 64,
+    num_train_samples: int = 100_000,
+    num_test_samples: int = 10_000,
+    T_train: int = 8,
+    T_eval: int = 32,
+    N_SUP: int = 16,
+    L_cycles: int = 1,
+    lr: float = 1e-4,
+    scale_lr: bool = True,
+    num_workers: int = 0,
+    use_wandb: bool = False,
+    wandb_project: str = "recursive-reasoning",
+    wandb_entity: str | None = None,
+    checkpoint_dir: str = "checkpoints",
+    log_dir: str = "logs",
+    resume_from: Path | None = None,
+    seed: int = 42,
+    dataset: str = "extreme",
+    use_amp: bool = False,
+    mlp_t: bool = True,  # MLP token mixing (outperforms attention on Sudoku)
+) -> None:
+    """
+    Run a TRM V2 training and evaluation experiment.
+
+    Uses the new SudokuTRMv2 model which matches the original TinyRecursiveModels
+    architecture with:
+    - MLP-based token mixing (mlp_t=True) or self-attention (mlp_t=False)
+    - Sequence-shaped latent states
+    - Learned state initialization
+
+    Args:
+        device_info: Device configuration from get_device_info().
+        puzzle_size: Size of the Sudoku grid (9 for 9x9).
+        hidden_size: Model dimension.
+        num_heads: Number of attention heads (ignored if mlp_t=True).
+        num_layers: Number of transformer layers in operator.
+        num_epochs: Number of training epochs.
+        batch_size: Batch size per GPU.
+        num_train_samples: Number of training samples.
+        num_test_samples: Number of test samples.
+        T_train: Improvement steps during training (H_cycles).
+        T_eval: Improvement steps during evaluation.
+        N_SUP: Number of supervision points per batch.
+        L_cycles: Latent updates per improvement step.
+        lr: Base learning rate.
+        scale_lr: Whether to scale LR with number of GPUs.
+        num_workers: Number of dataloader workers.
+        use_wandb: Whether to use Weights & Biases logging.
+        wandb_project: Wandb project name.
+        wandb_entity: Wandb entity/team name.
+        checkpoint_dir: Directory for saving checkpoints.
+        log_dir: Directory for saving logs.
+        resume_from: Optional checkpoint path to resume from.
+        seed: Random seed for reproducibility.
+        dataset: Dataset type: 'procedural' or 'extreme'.
+        use_amp: Whether to use automatic mixed precision.
+    """
+    device = device_info.device
+    effective_batch_size = get_effective_batch_size(batch_size, device_info)
+    effective_lr = scale_learning_rate(lr, device_info, scale_lr)
+    num_workers = optimize_dataloader_workers(num_workers, device_info)
+
+    print(f"TRM V2 experiment: puzzle={puzzle_size}x{puzzle_size}, hidden={hidden_size}, mlp_t={mlp_t}")
+    print(f"heads={num_heads}, layers={num_layers}")
+    print(f"T_train={T_train}, T_eval={T_eval}, N_SUP={N_SUP}, L_cycles={L_cycles}")
+    print(f"Batch size: {effective_batch_size} (per-GPU: {batch_size})")
+    print(f"Learning rate: {effective_lr:.2e}" + (f" (scaled from {lr:.2e})" if effective_lr != lr else ""))
+
+    # Compute puzzle-dependent dimensions
+    num_cells = puzzle_size * puzzle_size
+    num_digits = puzzle_size
+    cell_dim = puzzle_size + 1  # 0 for blank + digits 1..n
+
+    # Create experiment config
+    config = ExperimentConfig(
+        name="sudoku-trm-v2",
+        model_type="trm_v2",
+        model_dim=hidden_size,
+        epochs=num_epochs,
+        batch_size=batch_size,
+        learning_rate=lr,
+        T_train=T_train,
+        T_eval=T_eval,
+        N_SUP=N_SUP,
+        num_train_samples=num_train_samples,
+        num_test_samples=num_test_samples,
+        use_wandb=use_wandb,
+        wandb_project=wandb_project,
+        wandb_entity=wandb_entity,
+        checkpoint_dir=checkpoint_dir,
+        log_dir=log_dir,
+        wandb_tags=["trm_v2", "sudoku", f"{puzzle_size}x{puzzle_size}"],
+    )
+
+    # Create datasets
+    if dataset == "extreme":
+        # Sudoku-Extreme: 9x9 puzzles from HuggingFace
+        if puzzle_size != 9:
+            print(f"Warning: Sudoku-Extreme is 9x9 only. Overriding puzzle_size={puzzle_size} to 9.")
+            puzzle_size = 9
+            num_cells = 81
+            num_digits = 9
+            cell_dim = 10
+
+        task_config = SudokuTaskConfig(
+            train_samples=num_train_samples,
+            test_samples=num_test_samples,
+        )
+        task = SudokuExtremeTask(task_config)
+        train_dataset = task.get_train_dataset()
+        test_dataset = task.get_test_dataset()
+        print(f"Using Sudoku-Extreme dataset: {len(train_dataset)} train, {len(test_dataset)} test")
+    else:
+        # Procedural generation
+        train_dataset = SudokuDataset(
+            num_samples=num_train_samples,
+            num_blanks=6,
+            n=puzzle_size,
+        )
+        test_dataset = SudokuDataset(
+            num_samples=num_test_samples,
+            num_blanks=8,
+            n=puzzle_size,
+        )
+
+    # Cap batch size to training set size
+    train_batch_size = min(effective_batch_size, len(train_dataset))
+    if train_batch_size < effective_batch_size:
+        print(f"Warning: Batch size {effective_batch_size} > train samples {len(train_dataset)}. Using batch_size={train_batch_size}")
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=train_batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=device_info.device.type == "cuda",
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=effective_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device_info.device.type == "cuda",
+    )
+
+    # Create TRM V2 model
+    model = SudokuTRMv2(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        cell_dim=cell_dim,
+        num_cells=num_cells,
+        num_digits=num_digits,
+        mlp_t=mlp_t,
+    )
+
+    model = wrap_model_for_multi_gpu(model, device_info)
+
+    # Create experiment tracker
+    tracker = ExperimentTracker(
+        config=config,
+        model=unwrap_model(model),
+        resume_from=resume_from,
+    )
+
+    # Training
+    print("Starting TRM V2 training...")
+    train_sudoku_trm_v2(
+        model=model,
+        dataloader=train_loader,
+        device=device,
+        epochs=num_epochs,
+        T=T_train,
+        N_SUP=N_SUP,
+        L_cycles=L_cycles,
+        lr=effective_lr,
+        tracker=tracker,
+        test_loader=test_loader,
+        T_eval=T_eval,
+        start_epoch=0,
+        use_amp=use_amp,
+    )
+
+    # For evaluation, use unwrapped model
+    eval_model = cast(SudokuTRMv2, unwrap_model(model))
+
+    # Recursion depth ablation
+    print("\nRecursion depth ablation:")
+    ablation_results = {}
+    for T in [1, 2, 4, 8, 16, 32, 42, 64]:
+        acc_T = evaluate_trm_v2(
+            model=eval_model,
+            dataloader=test_loader,
+            device=device,
+            T=T,
+            L_cycles=L_cycles,
+        )
+        ablation_results[f"ablation/T_{T}"] = acc_T
+        print(f"  T={T:2d} → acc={acc_T:.4f}")
+
+    # Final evaluation at T_eval
+    final_acc = evaluate_trm_v2(
+        model=eval_model,
+        dataloader=test_loader,
+        device=device,
+        T=T_eval,
+        L_cycles=L_cycles,
+    )
+    print(f"\nFinal test accuracy (T={T_eval}): {final_acc:.4f}")
+
+    # Save results to JSON
+    results = {
+        "final_accuracy": final_acc,
+        "T_eval": T_eval,
+        "ablation": ablation_results,
+        "num_train_samples": num_train_samples,
+        "num_test_samples": num_test_samples,
+        "epochs": num_epochs,
+        "seed": seed,
+        "hidden_size": hidden_size,
+        "num_heads": num_heads,
+        "num_layers": num_layers,
     }
     results_path = tracker.log_dir / "results.json"
     with open(results_path, "w") as f:
@@ -719,9 +971,9 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        choices=["trm", "transformer", "lstm", "all"],
-        default="trm",
-        help="Model type to train (default: trm)",
+        choices=["trm", "trm_v2", "transformer", "lstm", "all"],
+        default="trm_v2",
+        help="Model type to train. trm_v2 uses Transformer-based operator (default: trm_v2)",
     )
 
     # Training parameters
@@ -774,6 +1026,17 @@ def main() -> None:
         type=int,
         default=1,
         help="TRM: latent updates per improvement step / L_cycles (default: 1)",
+    )
+    parser.add_argument(
+        "--mlp-t",
+        action="store_true",
+        default=True,
+        help="TRM V2: use MLP for token mixing instead of attention (default: True, best for Sudoku)",
+    )
+    parser.add_argument(
+        "--no-mlp-t",
+        action="store_true",
+        help="TRM V2: use self-attention for token mixing instead of MLP",
     )
     parser.add_argument(
         "--cell-embed-dim",
@@ -957,6 +1220,37 @@ def main() -> None:
             seed=args.seed,
             dataset=args.dataset,
             use_amp=args.amp,
+        )
+
+    if args.model in ("trm_v2", "all"):
+        print("\nTRM V2 (Transformer-based) EXPERIMENT\n")
+        run_trm_v2_experiment(
+            device_info=device_info,
+            puzzle_size=args.puzzle_size,
+            hidden_size=args.dim,
+            num_heads=args.dim // 64 if args.dim >= 128 else 4,  # Auto-scale heads
+            num_layers=args.depth if args.depth else 2,
+            num_epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            T_train=args.t_train,
+            T_eval=args.t_eval,
+            N_SUP=args.n_sup,
+            L_cycles=args.l_cycles,
+            scale_lr=scale_lr,
+            num_workers=args.num_workers,
+            num_train_samples=args.num_train,
+            num_test_samples=args.num_test,
+            use_wandb=args.wandb,
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            checkpoint_dir=args.checkpoint_dir,
+            log_dir=args.log_dir,
+            resume_from=resume_from,
+            seed=args.seed,
+            dataset=args.dataset,
+            use_amp=args.amp,
+            mlp_t=not args.no_mlp_t,  # Default True unless --no-mlp-t is specified
         )
 
     if args.model in ("transformer", "all"):
