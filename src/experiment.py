@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+import csv
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -182,6 +183,11 @@ class ExperimentTracker:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+        # CSV Logging Setup
+        self.metrics_file = self.log_dir / "metrics.csv"
+        self.recursion_file = self.log_dir / "recursion_metrics.csv"
+        self._init_csv_files()
+
         # Setup logger
         self.logger = get_logger(
             name=f"recursive-reasoning.{config.run_id}",
@@ -209,6 +215,18 @@ class ExperimentTracker:
         self.logger.info(f"Model type: {config.model_type}")
         self.logger.info(f"Log directory: {self.log_dir}")
         self.logger.info(f"Checkpoint directory: {self.checkpoint_dir}")
+
+    def _init_csv_files(self) -> None:
+        """Initialize CSV files with headers if they don't exist."""
+        if not self.metrics_file.exists():
+            with open(self.metrics_file, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["epoch", "step", "train_loss", "val_accuracy"])
+
+        if not self.recursion_file.exists():
+            with open(self.recursion_file, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["epoch", "recursion_step", "loss", "accuracy"])
 
     def _init_wandb(self) -> None:
         """Initialize Weights & Biases tracking."""
@@ -294,12 +312,28 @@ class ExperimentTracker:
         if extra_metrics:
             metrics.update(extra_metrics)
 
-        # Log metrics
+        # Log to CSV
+        with open(self.metrics_file, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                epoch, 
+                self.global_step, 
+                train_loss, 
+                val_accuracy if val_accuracy is not None else ""
+            ])
+
+        # Log metrics to console/wandb
         metrics_str = " | ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
         self.logger.info(f"Epoch {epoch} completed | {metrics_str}")
 
         if self.config.use_wandb and self.wandb_run is not None:
             wandb.log(metrics, step=self.global_step)  # type: ignore[union-attr]
+
+    def log_recursion(self, epoch: int, step: int, loss: float, accuracy: float) -> None:
+        """Log per-recursion-step metrics for TRM."""
+        with open(self.recursion_file, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch, step, loss, accuracy])
 
         # Periodic checkpoints disabled to save disk space
         # Only best.pt is saved (when val_accuracy improves)

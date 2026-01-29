@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -23,7 +24,7 @@ from src.distributed import get_device_info
 from src.experiment import load_model_from_checkpoint
 from src.models.lstm import SudokuLSTM
 from src.models.transformer import SudokuTransformer
-from src.models.trm import SudokuTRM
+from src.models.trm import SudokuTRM, SudokuTRMv2
 def compute_saliency(model, x, y_target):
     """
     Compute gradient saliency for a batch.
@@ -189,7 +190,7 @@ def analyze_single_cell_saliency(model, x, y, puzzle_size=9):
     return smap, target_cells
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True, choices=["trm", "transformer", "lstm"])
+    parser.add_argument("--model", type=str, required=True, choices=["trm", "trm_v2", "transformer", "lstm"])
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--puzzle-size", type=int, default=9)
     parser.add_argument("--num-samples", type=int, default=100)
@@ -197,26 +198,44 @@ def main():
     
     device = get_device_info().device
     
-    # Load model class
-    if args.model == "trm":
+    # Load model class and config
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    config = checkpoint.get("config", {})
+    model_type = config.get("model_type", args.model)
+    
+    if model_type == "trm_v2":
+        cls = SudokuTRMv2
+        model_kwargs = {
+            "hidden_size": config.get("model_dim", 512),
+            "num_heads": config.get("n_heads", 8),
+            "num_layers": config.get("depth", 2),
+        }
+    elif model_type == "trm":
         cls = SudokuTRM
-    elif args.model == "transformer":
+        model_kwargs = {
+            "trm_dim": config.get("model_dim", 128),
+        }
+    elif model_type == "transformer":
         cls = SudokuTransformer
-    elif args.model == "lstm":
+        model_kwargs = {
+            "d_model": config.get("model_dim", 128),
+            "depth": config.get("depth", 6),
+            "n_heads": config.get("n_heads", 4),
+        }
+    elif model_type == "lstm":
         cls = SudokuLSTM
-        
-    # Load checkpoint
-    print(f"Loading {args.model} from {args.checkpoint}...")
+        model_kwargs = {
+            "d_model": config.get("model_dim", 128),
+            "hidden_size": config.get("hidden_size", 128),
+            "num_layers": config.get("depth", 3),
+        }
+
+    print(f"Loading {model_type} from {args.checkpoint}...")
     model = load_model_from_checkpoint(
         Path(args.checkpoint),
         cls,
         device,
-        # Add default kwargs if needed
-        num_cells=args.puzzle_size**2,
-        num_digits=args.puzzle_size,
-        cell_dim=args.puzzle_size+1,
-        # For Transformer/LSTM specific args, we rely on them being in config or default
-        # If they fail, we might need to inspect config from checkpoint
+        **model_kwargs
     )
     
     # Data - use procedural for quick check

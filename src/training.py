@@ -41,6 +41,7 @@ def train_sudoku_trm(
     T_eval: int = 32,
     start_epoch: int = 0,
     use_amp: bool = False,
+    warmup_steps: int = 0,
 ) -> None:
     """
     Train a Sudoku TRM model with deep supervision.
@@ -102,6 +103,17 @@ def train_sudoku_trm(
     optimizer = torch.optim.AdamW(
         params, lr=lr, weight_decay=weight_decay, betas=(0.9, 0.95)
     )
+
+    # LR Warmup scheduler
+    effective_warmup = min(warmup_steps, num_batches * epochs * N_SUP)
+    
+    def lr_lambda(step: int) -> float:
+        if step < effective_warmup:
+            return step / max(1, effective_warmup)
+        return 1.0
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     # Paper: stable-max cross-entropy loss
     loss_fn = StableMaxCrossEntropy()
 
@@ -169,6 +181,7 @@ def train_sudoku_trm(
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
+                scheduler.step() # LR Warmup
                 global_step += 1
 
                 # Update EMA
@@ -326,6 +339,17 @@ def train_transformer(
         lr=lr,
         weight_decay=weight_decay,
     )
+
+    # LR Warmup scheduler
+    effective_warmup = min(warmup_steps, len(train_loader) * num_epochs)
+    
+    def lr_lambda(step: int) -> float:
+        if step < effective_warmup:
+            return step / max(1, effective_warmup)
+        return 1.0
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     loss_fn = nn.CrossEntropyLoss()
 
     # Determine starting epoch (for resuming)
@@ -357,6 +381,8 @@ def train_transformer(
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step() # LR Warmup
+            global_step += 1
 
             loss_meter.update(loss.item())
 
@@ -440,6 +466,7 @@ def train_lstm(
     verbose: bool = True,
     tracker: Optional["ExperimentTracker"] = None,
     use_amp: bool = False,
+    warmup_steps: int = 0,
 ) -> None:
     """
     Train an LSTM model on Sudoku.
@@ -479,6 +506,17 @@ def train_lstm(
         lr=lr,
         weight_decay=weight_decay,
     )
+
+    # LR Warmup scheduler
+    effective_warmup = min(warmup_steps, len(train_loader) * num_epochs)
+    
+    def lr_lambda(step: int) -> float:
+        if step < effective_warmup:
+            return step / max(1, effective_warmup)
+        return 1.0
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     loss_fn = nn.CrossEntropyLoss()
 
     # Determine starting epoch (for resuming)
@@ -510,6 +548,8 @@ def train_lstm(
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step() # LR Warmup
+            global_step += 1
 
             loss_meter.update(loss.item())
 
@@ -610,6 +650,7 @@ def train_sudoku_trm_v2(
     T_eval: int = 32,
     start_epoch: int = 0,
     use_amp: bool = False,
+    warmup_steps: int = 0,
 ) -> None:
     """
     Train a Sudoku TRM V2 model (Transformer-based) with deep supervision.
@@ -664,6 +705,17 @@ def train_sudoku_trm_v2(
     optimizer = torch.optim.AdamW(
         params, lr=lr, weight_decay=weight_decay, betas=(0.9, 0.95)
     )
+
+    # LR Warmup scheduler
+    effective_warmup = min(warmup_steps, num_batches * epochs * N_SUP)
+    
+    def lr_lambda(step: int) -> float:
+        if step < effective_warmup:
+            return step / max(1, effective_warmup)
+        return 1.0
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
 
     # StableMax cross-entropy loss (matching original)
     loss_fn = StableMaxCrossEntropy()
@@ -732,6 +784,7 @@ def train_sudoku_trm_v2(
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
+                scheduler.step() # LR Warmup
                 global_step += 1
 
                 # Update EMA
@@ -758,6 +811,22 @@ def train_sudoku_trm_v2(
             ema_head.apply(base_model.output_head)
 
             val_acc = evaluate_trm_v2(base_model, test_loader, device, T=T_eval, L_cycles=L_cycles)
+
+            # --- Figures 2 & 3: Thinking Trajectory Probing ---
+            # Probe a single batch to see how accuracy improves with depth
+            if tracker is not None:
+                x_probe, y_probe = next(iter(test_loader))
+                x_probe, y_probe = x_probe.to(device), y_probe.to(device)
+                with torch.no_grad():
+                    # We probe steps 1 to T_eval (or at least 32)
+                    probe_depths = sorted(list(set([1, 2, 3, 4, 8, 16, 32, T_eval, 64])))
+                    probe_depths = [d for d in probe_depths if d <= max(T_eval, 64)]
+                    
+                    for d in probe_depths:
+                        logits_d = base_model(x_probe, T=d, L_cycles=L_cycles)
+                        acc_d = (logits_d.argmax(dim=-1) == y_probe).float().mean().item()
+                        loss_d = loss_fn(logits_d.view(-1, logits_d.size(-1)), y_probe.view(-1)).item()
+                        tracker.log_recursion(actual_epoch + 1, d, loss_d, acc_d)
 
         if tracker is not None:
             tracker.log_epoch(

@@ -84,20 +84,20 @@ LSTM_LAYERS=3
 DATASETS=(1000 3000 10000)
 
 # Random seeds
-SEEDS=(0)
+SEEDS=(0 1 2)
 
 # Batch sizes per dataset
 declare -A BATCH_MAP=(
   [1000]=256
-  [3000]=512
-  [10000]=768
+  [3000]=256
+  [10000]=512
 )
 
-# Epoch schedule (scaled for ~500K-1M gradient steps per experiment)
+# Epoch schedule (Matched for ~200k gradient steps)
 declare -A EPOCHS_MAP=(
-  [1000]=10000    # 10K epochs
-  [3000]=6000     # 6K epochs
-  [10000]=3000    # 3K epochs
+  [1000]=50000    # 1000/256 = 4 steps * 50k = 200k
+  [3000]=17000    # 3000/256 = 12 steps * 17k = 204k
+  [10000]=10000   # 10000/512 = 20 steps * 10k = 200k
 )
 
 # Learning rates
@@ -128,6 +128,7 @@ run_experiment() {
     cmd="$cmd --wandb"
     [[ $SCALE_LR -eq 0 ]] && cmd="$cmd --no-scale-lr"
     [[ $USE_AMP -eq 1 ]] && cmd="$cmd --amp"
+    cmd="$cmd --warmup-steps 2000"
 
     log "Running: $cmd"
     eval "$cmd"
@@ -154,6 +155,7 @@ run_quick() {
         --lr $LR_TRM \
         --puzzle-size $PUZZLE_SIZE \
         --dataset $DATASET \
+        --compile \
         --seed 0
 }
 
@@ -180,9 +182,12 @@ run_trm_v2() {
                 --dataset $DATASET
                 --seed $seed
             )
-            # MLP token mixing (default True, add --no-mlp-t to use attention)
-            [[ $MLP_T -eq 0 ]] && exp_args+=(--no-mlp-t)
+            # Add --compile for faster training on high-end GPUs
+            exp_args+=(--compile)
             
+            # Add mechanistic probing for Fig 2
+            exp_args+=(--log-recursion)
+
             run_experiment "trm_v2-n${n}-seed${seed}" "${exp_args[@]}"
         done
     done
@@ -210,6 +215,8 @@ run_trm_v2_attn() {
                 --puzzle-size $PUZZLE_SIZE \
                 --dataset $DATASET \
                 --no-mlp-t \
+                --compile \
+                --log-recursion \
                 --seed $seed
         done
     done
@@ -233,6 +240,7 @@ run_transformer() {
                 --lr $LR_TRANSFORMER \
                 --puzzle-size $PUZZLE_SIZE \
                 --dataset $DATASET \
+                --compile \
                 --seed $seed
         done
     done
@@ -256,6 +264,7 @@ run_lstm() {
                 --lr $LR_LSTM \
                 --puzzle-size $PUZZLE_SIZE \
                 --dataset $DATASET \
+                --compile \
                 --seed $seed
         done
     done

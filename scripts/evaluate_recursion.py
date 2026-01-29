@@ -10,8 +10,8 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.data import SudokuDataset
 from src.distributed import get_device_info
 from src.experiment import load_model_from_checkpoint
-from src.models.trm import SudokuTRM, TRM
-from src.training import evaluate_trm
+from src.models.trm import SudokuTRM, TRM, SudokuTRMv2
+from src.training import evaluate_trm, evaluate_trm_v2
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
@@ -30,24 +30,32 @@ def main():
     # Note: We need to manually match the architecture args if not in config
     # But usually load_model_from_checkpoint handles the saved config
     try:
+        # Load config to determine model class
+        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        config = checkpoint.get("config", {})
+        
+        if config.get("model_type") == "trm_v2":
+            model_class = SudokuTRMv2
+            eval_fn = evaluate_trm_v2
+            model_kwargs = {
+                "hidden_size": config.get("model_dim", 512),
+                "num_heads": config.get("n_heads", 8),
+                "num_layers": config.get("depth", 2),
+            }
+        else:
+            model_class = SudokuTRM
+            eval_fn = evaluate_trm
+            model_kwargs = {}
+
         model = load_model_from_checkpoint(
             Path(args.checkpoint),
-            SudokuTRM,
-            device
+            model_class,
+            device,
+            **model_kwargs
         )
     except Exception as e:
-        print(f"Error loading model directly: {e}")
-        print("Attempting to load with default 9x9 params...")
-        model = load_model_from_checkpoint(
-            Path(args.checkpoint),
-            SudokuTRM,
-            device,
-            trm_dim=368, # Default from reproduction script
-            cell_embed_dim=48,
-            num_cells=81,
-            num_digits=9,
-            cell_dim=10
-        )
+        print(f"Error loading model: {e}")
+        sys.exit(1)
         
     model.eval()
     
@@ -69,7 +77,7 @@ def main():
     print("-" * 30)
     
     for T in args.depths:
-        acc = evaluate_trm(model, dataloader, device, T=T)
+        acc = eval_fn(model, dataloader, device, T=T)
         results[T] = acc
         print(f"{T:<10} | {acc:.4f}")
         

@@ -355,6 +355,8 @@ def run_trm_v2_experiment(
     dataset: str = "extreme",
     use_amp: bool = False,
     mlp_t: bool = True,  # MLP token mixing (outperforms attention on Sudoku)
+    compile: bool = False,
+    warmup_steps: int = 2000,
 ) -> None:
     """
     Run a TRM V2 training and evaluation experiment.
@@ -493,6 +495,14 @@ def run_trm_v2_experiment(
 
     model = wrap_model_for_multi_gpu(model, device_info)
 
+    # Compile model for speed if requested
+    if compile:
+        try:
+            print("Compiling model (this may take a few minutes)...")
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"Warning: torch.compile failed: {e}. Proceeding without compilation.")
+
     # Create experiment tracker
     tracker = ExperimentTracker(
         config=config,
@@ -516,6 +526,7 @@ def run_trm_v2_experiment(
         T_eval=T_eval,
         start_epoch=0,
         use_amp=use_amp,
+        warmup_steps=warmup_steps,
     )
 
     # For evaluation, use unwrapped model
@@ -601,6 +612,8 @@ def run_transformer_experiment(
     resume_from: Path | None = None,
     dataset: str = "procedural",
     use_amp: bool = False,
+    compile: bool = False,
+    warmup_steps: int = 2000,
 ) -> None:
     """
     Run a complete Transformer baseline experiment.
@@ -729,6 +742,14 @@ def run_transformer_experiment(
     )
     model = wrap_model_for_multi_gpu(model, device_info)
 
+    # Compile model for speed if requested
+    if compile:
+        try:
+            print("Compiling model (this may take a few minutes)...")
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"Warning: torch.compile failed: {e}. Proceeding without compilation.")
+
     # Create experiment tracker (use unwrapped model for checkpointing)
     tracker = ExperimentTracker(
         config=config,
@@ -747,6 +768,7 @@ def run_transformer_experiment(
         lr=effective_lr,
         tracker=tracker,
         use_amp=use_amp,
+        warmup_steps=warmup_steps,
     )
 
     # Final evaluation (use unwrapped model)
@@ -794,6 +816,8 @@ def run_lstm_experiment(
     resume_from: Path | None = None,
     dataset: str = "procedural",
     use_amp: bool = False,
+    compile: bool = False,
+    warmup_steps: int = 2000,
 ) -> None:
     """
     Run a complete LSTM baseline experiment.
@@ -919,6 +943,14 @@ def run_lstm_experiment(
     )
     model = wrap_model_for_multi_gpu(model, device_info)
 
+    # Compile model for speed if requested
+    if compile:
+        try:
+            print("Compiling model (this may take a few minutes)...")
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"Warning: torch.compile failed: {e}. Proceeding without compilation.")
+
     # Create experiment tracker (use unwrapped model for checkpointing)
     tracker = ExperimentTracker(
         config=config,
@@ -937,6 +969,7 @@ def run_lstm_experiment(
         lr=effective_lr,
         tracker=tracker,
         use_amp=use_amp,
+        warmup_steps=warmup_steps,
     )
 
     # Final evaluation (use unwrapped model)
@@ -1171,6 +1204,17 @@ def main() -> None:
         action="store_true",
         help="Enable automatic mixed precision (AMP) for faster training",
     )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile for faster recursive loops",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=2000,
+        help="Number of linear warmup steps for learning rate (default: 2000)",
+    )
 
     args = parser.parse_args()
 
@@ -1251,6 +1295,8 @@ def main() -> None:
             dataset=args.dataset,
             use_amp=args.amp,
             mlp_t=not args.no_mlp_t,  # Default True unless --no-mlp-t is specified
+            compile=args.compile,
+            warmup_steps=args.warmup_steps,
         )
 
     if args.model in ("transformer", "all"):
@@ -1276,6 +1322,8 @@ def main() -> None:
             resume_from=resume_from,
             dataset=args.dataset,
             use_amp=args.amp,
+            compile=args.compile,
+            warmup_steps=args.warmup_steps,
         )
 
     if args.model in ("lstm", "all"):
@@ -1302,6 +1350,8 @@ def main() -> None:
             resume_from=resume_from,
             dataset=args.dataset,
             use_amp=args.amp,
+            compile=args.compile,
+            warmup_steps=args.warmup_steps,
         )
 
 
