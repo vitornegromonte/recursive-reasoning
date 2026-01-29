@@ -216,6 +216,21 @@ def train_sudoku_trm(
 
             val_acc = evaluate_trm(base_model, test_loader, device, T=T_eval)
 
+            # --- Figures 2 & 3: Thinking Trajectory Probing ---
+            if tracker is not None:
+                x_probe, y_probe = next(iter(test_loader))
+                x_probe, y_probe = x_probe.to(device), y_probe.to(device)
+                with torch.no_grad():
+                    # We probe standard depths for RSI analysis
+                    probe_depths = sorted(list(set([1, 2, 4, 8, 16, 32, T_eval, 64])))
+                    probe_depths = [d for d in probe_depths if d <= 128] # Cap for safety
+                    
+                    for d in probe_depths:
+                        logits_d = base_model(x_probe, T=d)
+                        acc_d = (logits_d.argmax(dim=-1) == y_probe).float().mean().item()
+                        loss_d = loss_fn(logits_d.view(-1, logits_d.size(-1)), y_probe.view(-1)).item()
+                        tracker.log_recursion(actual_epoch + 1, d, loss_d, acc_d)
+
         if tracker is not None:
             tracker.log_epoch(
                 epoch=actual_epoch + 1,
