@@ -95,9 +95,9 @@ declare -A BATCH_MAP=(
 
 # Epoch schedule (Matched for ~200k gradient steps)
 declare -A EPOCHS_MAP=(
-  [1000]=50000    # 1000/256 = 4 steps * 50k = 200k
-  [3000]=17000    # 3000/256 = 12 steps * 17k = 204k
-  [10000]=10000   # 10000/512 = 20 steps * 10k = 200k
+  [1000]=3125     # 1000/256 ≈ 4 batches * 3125 epochs * 16 steps/batch ≈ 200k steps
+  [3000]=1062     # 3000/256 ≈ 12 batches * 1062 epochs * 16 steps/batch ≈ 200k steps
+  [10000]=625     # 10000/512 ≈ 20 batches * 625 epochs * 16 steps/batch ≈ 200k steps
 )
 
 # Learning rates
