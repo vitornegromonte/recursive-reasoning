@@ -12,7 +12,7 @@ from src.models import (
     SudokuTransformer,
     TinyTRMMLP,
 )
-from src.models.lstm import SudokuLSTM, SudokuDeepLSTM
+from src.models.lstm import SudokuDeepLSTM, SudokuLSTM
 from src.models.trm import SudokuTRM, latent_recursion
 
 

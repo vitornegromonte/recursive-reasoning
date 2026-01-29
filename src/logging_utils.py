@@ -765,7 +765,7 @@ def load_experiment_metrics(experiment_dir: Path) -> dict[str, Any]:
     Returns:
         Dictionary with 'config', 'metrics', 'recursion', 'latent' keys.
     """
-    import pandas as pd  # type: ignore[import-not-found]
+    import pandas as pd
 
     result: dict[str, Any] = {}
 
@@ -803,7 +803,7 @@ def aggregate_results(
     Returns:
         DataFrame with aggregated results.
     """
-    import pandas as pd  # type: ignore[import-not-found]
+    import pandas as pd
 
     log_dir = Path(log_dir)
     rows = []

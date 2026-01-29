@@ -15,8 +15,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA  # type: ignore
+from sklearn.manifold import TSNE  # type: ignore
 
 
 def load_trajectories(path: str | Path) -> dict:
@@ -103,7 +103,7 @@ def plot_single_trajectories(
     fig, ax = plt.subplots(figsize=(10, 8))
 
     # Color by step number
-    cmap = plt.cm.viridis
+    cmap = plt.get_cmap("viridis")
     colors = cmap(np.linspace(0, 1, num_steps))
 
     for sample_idx in range(len(reduced)):
@@ -166,7 +166,7 @@ def plot_comparison(
     if num_models == 1:
         axes = [axes]
 
-    for ax, data in zip(axes, data_list):
+    for ax, data in zip(axes, data_list, strict=False):
         model_type = data.get("model_type", "unknown")
         num_steps = data.get("num_steps", 0)
 
@@ -181,7 +181,7 @@ def plot_comparison(
         traj = traj[:num_samples]
         reduced = reduce_dimensions(traj, method=method)
 
-        cmap = plt.cm.viridis
+        cmap = plt.get_cmap("viridis")
         colors = cmap(np.linspace(0, 1, num_steps))
 
         for sample_idx in range(len(reduced)):

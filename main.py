@@ -9,9 +9,10 @@ models on the Sudoku task. Supports multi-GPU training via DataParallel.
 import argparse
 import json
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.data import SudokuDataset
@@ -246,7 +247,7 @@ def run_trm_experiment(
     # Create experiment tracker for checkpointing and logging
     tracker = ExperimentTracker(
         config=config,
-        model=unwrap_model(model),
+        model=unwrap_model(cast(nn.Module, model)),
         resume_from=resume_from,
     )
 
@@ -273,7 +274,7 @@ def run_trm_experiment(
     exp_logger.finish()
 
     # For evaluation, use unwrapped model
-    eval_model = cast(SudokuTRM, unwrap_model(model))
+    eval_model = cast(SudokuTRM, unwrap_model(cast(nn.Module, model)))
 
     # Recursion depth ablation (uses default L_cycles=1 for simplicity)
     print("\nRecursion depth ablation:")
@@ -320,7 +321,7 @@ def run_trm_experiment(
     # Log ablation results to wandb
     if config.use_wandb:
         try:
-            import wandb  # type: ignore[import-not-found]
+            import wandb
 
             wandb.log(ablation_results)
             wandb.log({"final_accuracy": final_acc})
@@ -506,14 +507,14 @@ def run_trm_v2_experiment(
     # Create experiment tracker
     tracker = ExperimentTracker(
         config=config,
-        model=unwrap_model(model),
+        model=unwrap_model(cast(nn.Module, model)),
         resume_from=resume_from,
     )
 
     # Training
     print("Starting TRM V2 training...")
     train_sudoku_trm_v2(
-        model=model,
+        model=cast(Any, model),
         dataloader=train_loader,
         device=device,
         epochs=num_epochs,
@@ -530,7 +531,7 @@ def run_trm_v2_experiment(
     )
 
     # For evaluation, use unwrapped model
-    eval_model = cast(SudokuTRMv2, unwrap_model(model))
+    eval_model = cast(SudokuTRMv2, unwrap_model(cast(nn.Module, model)))
 
     # Recursion depth ablation
     print("\nRecursion depth ablation:")
@@ -581,7 +582,7 @@ def run_trm_v2_experiment(
     # Log ablation results to wandb
     if config.use_wandb:
         try:
-            import wandb  # type: ignore[import-not-found]
+            import wandb
 
             wandb.log(ablation_results)
             wandb.log({"final_accuracy": final_acc})
@@ -753,14 +754,14 @@ def run_transformer_experiment(
     # Create experiment tracker (use unwrapped model for checkpointing)
     tracker = ExperimentTracker(
         config=config,
-        model=unwrap_model(model),
+        model=unwrap_model(cast(nn.Module, model)),
         resume_from=resume_from,
     )
 
     # Training
     print("Starting Transformer training...")
     train_transformer(
-        model=model,
+        model=cast(Any, model),
         train_loader=train_loader,
         test_loader=test_loader,
         device=device,
@@ -772,7 +773,7 @@ def run_transformer_experiment(
     )
 
     # Final evaluation (use unwrapped model)
-    eval_model = cast(SudokuTransformer, unwrap_model(model))
+    eval_model = cast(SudokuTransformer, unwrap_model(cast(nn.Module, model)))
     acc = evaluate_transformer(eval_model, test_loader, device)
     print(f"\nFinal test accuracy: {acc:.4f}")
 
@@ -954,14 +955,14 @@ def run_lstm_experiment(
     # Create experiment tracker (use unwrapped model for checkpointing)
     tracker = ExperimentTracker(
         config=config,
-        model=unwrap_model(model),
+        model=unwrap_model(cast(nn.Module, model)),
         resume_from=resume_from,
     )
 
     # Training
     print("Starting LSTM training...")
     train_lstm(
-        model=model,
+        model=cast(Any, model),
         train_loader=train_loader,
         test_loader=test_loader,
         device=device,
@@ -973,7 +974,7 @@ def run_lstm_experiment(
     )
 
     # Final evaluation (use unwrapped model)
-    eval_model = cast(SudokuLSTM, unwrap_model(model))
+    eval_model = cast(SudokuLSTM, unwrap_model(cast(nn.Module, model)))
     acc = evaluate_lstm(eval_model, test_loader, device)
     print(f"\nFinal test accuracy: {acc:.4f}")
 

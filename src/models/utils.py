@@ -125,7 +125,7 @@ class StableMaxCrossEntropy(nn.Module):
         # Handle ignore_index
         if valid_mask is None:
             valid_mask = (targets != self.ignore_index)
-        
+
         # Replace ignored targets with 0 for gather
         safe_targets = torch.where(valid_mask, targets, 0)
 

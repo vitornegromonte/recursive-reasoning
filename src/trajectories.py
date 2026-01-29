@@ -14,12 +14,11 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.models.lstm import SudokuDeepLSTM, SudokuLSTM
 from src.models.transformer import SudokuTransformer
-from src.models.trm import SudokuTRM, latent_recursion
+from src.models.trm import SudokuTRM
 
 
 @torch.no_grad()
@@ -30,7 +29,7 @@ def collect_trm_trajectories(
     T: int = 32,
     L_cycles: int = 1,
     max_samples: int | None = None,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Any]:
     """
     Collect hidden state trajectories from a TRM model.
 
@@ -147,7 +146,7 @@ def collect_transformer_trajectories(
     dataloader: DataLoader,
     device: torch.device,
     max_samples: int | None = None,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Any]:
     """
     Collect hidden state trajectories from a Transformer model.
 
@@ -244,7 +243,7 @@ def collect_lstm_trajectories(
     dataloader: DataLoader,
     device: torch.device,
     max_samples: int | None = None,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Any]:
     """
     Collect hidden state trajectories from an LSTM model.
 

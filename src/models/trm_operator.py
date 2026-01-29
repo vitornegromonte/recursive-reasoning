@@ -6,8 +6,6 @@ This implements the recursive reasoning block using:
 - RMS normalization (post-norm style)
 """
 
-import math
-from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -25,6 +23,8 @@ def rms_norm(hidden_states: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
 
 class RotaryEmbedding(nn.Module):
     """Rotary Position Embedding (RoPE)."""
+    cos_cached: torch.Tensor
+    sin_cached: torch.Tensor
 
     def __init__(self, dim: int, max_seq_len: int = 128, base: float = 10000.0):
         """
@@ -43,7 +43,7 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("cos_cached", emb.cos(), persistent=False)
         self.register_buffer("sin_cached", emb.sin(), persistent=False)
 
-    def forward(self, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Return cos and sin for the given sequence length."""
         return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
 
@@ -60,7 +60,7 @@ def apply_rotary_pos_emb(
     k: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply rotary position embedding to queries and keys.
 
     Args:
@@ -137,7 +137,7 @@ class TRMAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cos_sin: Tuple[torch.Tensor, torch.Tensor] | None = None,
+        cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
         Forward pass.
@@ -229,7 +229,7 @@ class TRMBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cos_sin: Tuple[torch.Tensor, torch.Tensor] | None = None,
+        cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
         Forward pass.
@@ -338,8 +338,13 @@ class TRMOperator(nn.Module):
         Returns:
             Updated state of shape (batch, seq_len, hidden_size).
         """
+        if not inputs:
+            raise ValueError("TRMOperator requires at least one input tensor")
+
         # Sum all inputs (input injection)
-        hidden_states = sum(inputs)
+        hidden_states = inputs[0]
+        for i in range(1, len(inputs)):
+            hidden_states = hidden_states + inputs[i]
 
         # Get RoPE embeddings (only if using attention)
         cos_sin = None

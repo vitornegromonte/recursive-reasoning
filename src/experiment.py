@@ -1,9 +1,9 @@
 """Logging, checkpointing, and experiment tracking utilities."""
 
+import csv
 import json
 import logging
 import sys
-import csv
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -14,12 +14,12 @@ import torch.nn as nn
 
 # Try to import wandb, but make it optional
 try:
-    import wandb  # type: ignore[import-not-found]
+    import wandb
 
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
-    wandb = None
+    wandb: Any = None
 
 
 def get_logger(
@@ -238,7 +238,7 @@ class ExperimentTracker:
             return
 
         try:
-            self.wandb_run = wandb.init(  # type: ignore[union-attr]
+            self.wandb_run = wandb.init(  # type: ignore
                 project=self.config.wandb_project,
                 entity=self.config.wandb_entity,
                 name=self.config.run_id,
@@ -246,8 +246,8 @@ class ExperimentTracker:
                 tags=self.config.wandb_tags,
                 resume="allow",
             )
-            if wandb.run is not None:  # type: ignore[union-attr]
-                self.logger.info(f"Wandb initialized: {wandb.run.url}")  # type: ignore[union-attr]
+            if wandb.run is not None:  # type: ignore
+                self.logger.info(f"Wandb initialized: {wandb.run.url}")  # type: ignore
         except Exception as e:
             self.logger.warning(f"Failed to initialize wandb: {e}")
             self.config.use_wandb = False
@@ -278,7 +278,7 @@ class ExperimentTracker:
 
         # Log to wandb
         if self.config.use_wandb and self.wandb_run is not None:
-            wandb.log(metrics, step=step)  # type: ignore[union-attr]
+            wandb.log(metrics, step=step)  # type: ignore
 
     def log_epoch(
         self,
@@ -316,9 +316,9 @@ class ExperimentTracker:
         with open(self.metrics_file, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
-                epoch, 
-                self.global_step, 
-                train_loss, 
+                epoch,
+                self.global_step,
+                train_loss,
                 val_accuracy if val_accuracy is not None else ""
             ])
 
@@ -327,7 +327,7 @@ class ExperimentTracker:
         self.logger.info(f"Epoch {epoch} completed | {metrics_str}")
 
         if self.config.use_wandb and self.wandb_run is not None:
-            wandb.log(metrics, step=self.global_step)  # type: ignore[union-attr]
+            wandb.log(metrics, step=self.global_step)  # type: ignore
 
     def log_recursion(self, epoch: int, step: int, loss: float, accuracy: float) -> None:
         """Log per-recursion-step metrics for TRM."""
@@ -421,7 +421,7 @@ class ExperimentTracker:
         self.save_checkpoint("last.pt")
 
         if self.config.use_wandb and self.wandb_run is not None:
-            wandb.finish()  # type: ignore[union-attr]
+            wandb.finish()  # type: ignore
 
         self.logger.info(f"Experiment finished. Best metric: {self.best_metric:.4f}")
 

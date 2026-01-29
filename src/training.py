@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import cast
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.models.lstm import SudokuLSTM
+from src.models.lstm import SudokuDeepLSTM, SudokuLSTM
 from src.models.transformer import SudokuTransformer
-from src.models.trm import SudokuTRM, latent_recursion
+from src.models.trm import SudokuTRM, SudokuTRMv2, latent_recursion
 from src.models.utils import EMA, AverageMeter, StableMaxCrossEntropy
 
 # Import experiment tracking (optional)
@@ -36,7 +36,7 @@ def train_sudoku_trm(
     weight_decay: float = 1.0,
     ema_decay: float = 0.999,
     verbose: bool = True,
-    tracker: Optional["ExperimentTracker"] = None,
+    tracker: ExperimentTracker | None = None,
     test_loader: DataLoader | None = None,
     T_eval: int = 32,
     start_epoch: int = 0,
@@ -81,9 +81,9 @@ def train_sudoku_trm(
     """
     # Get the underlying model for accessing submodules
     if isinstance(model, nn.DataParallel):
-        base_model: SudokuTRM = model.module  # type: ignore[assignment]
+        base_model = cast(SudokuTRM, model.module)
     else:
-        base_model = model
+        base_model = cast(SudokuTRM, model)
 
     model.to(device)
     model.train()
@@ -105,8 +105,9 @@ def train_sudoku_trm(
     )
 
     # LR Warmup scheduler
+    num_batches = len(dataloader)
     effective_warmup = min(warmup_steps, num_batches * epochs * N_SUP)
-    
+
     def lr_lambda(step: int) -> float:
         if step < effective_warmup:
             return step / max(1, effective_warmup)
@@ -120,7 +121,6 @@ def train_sudoku_trm(
     ema_trm = EMA(base_model.trm_net, decay=ema_decay)
     ema_head = EMA(base_model.output_head, decay=ema_decay)
 
-    global_step = 0
 
     # Mixed precision setup
     scaler = torch.amp.GradScaler(enabled=use_amp)
@@ -182,7 +182,6 @@ def train_sudoku_trm(
                 scaler.step(optimizer)
                 scaler.update()
                 scheduler.step() # LR Warmup
-                global_step += 1
 
                 # Update EMA
                 ema_trm.update(base_model.trm_net)
@@ -222,9 +221,9 @@ def train_sudoku_trm(
                 x_probe, y_probe = x_probe.to(device), y_probe.to(device)
                 with torch.no_grad():
                     # We probe standard depths for RSI analysis
-                    probe_depths = sorted(list(set([1, 2, 4, 8, 16, 32, T_eval, 64])))
+                    probe_depths = sorted({1, 2, 4, 8, 16, 32, T_eval, 64})
                     probe_depths = [d for d in probe_depths if d <= 128] # Cap for safety
-                    
+
                     for d in probe_depths:
                         logits_d = base_model(x_probe, T=d)
                         acc_d = (logits_d.argmax(dim=-1) == y_probe).float().mean().item()
@@ -313,8 +312,9 @@ def train_transformer(
     lr: float = 3e-4,
     weight_decay: float = 1e-4,
     verbose: bool = True,
-    tracker: Optional["ExperimentTracker"] = None,
+    tracker: ExperimentTracker | None = None,
     use_amp: bool = False,
+    warmup_steps: int = 0,
 ) -> None:
     """
     Train a Transformer model on Sudoku.
@@ -336,9 +336,9 @@ def train_transformer(
     """
     # Get the underlying model for accessing parameters
     if isinstance(model, nn.DataParallel):
-        base_model: SudokuTransformer = model.module  # type: ignore[assignment]
+        base_model = cast(SudokuTransformer, model.module)
     else:
-        base_model = model
+        base_model = cast(SudokuTransformer, model)
 
     model.to(device)
 
@@ -357,7 +357,7 @@ def train_transformer(
 
     # LR Warmup scheduler
     effective_warmup = min(warmup_steps, len(train_loader) * num_epochs)
-    
+
     def lr_lambda(step: int) -> float:
         if step < effective_warmup:
             return step / max(1, effective_warmup)
@@ -397,7 +397,6 @@ def train_transformer(
             scaler.step(optimizer)
             scaler.update()
             scheduler.step() # LR Warmup
-            global_step += 1
 
             loss_meter.update(loss.item())
 
@@ -479,7 +478,7 @@ def train_lstm(
     lr: float = 3e-4,
     weight_decay: float = 1e-4,
     verbose: bool = True,
-    tracker: Optional["ExperimentTracker"] = None,
+    tracker: ExperimentTracker | None = None,
     use_amp: bool = False,
     warmup_steps: int = 0,
 ) -> None:
@@ -503,9 +502,9 @@ def train_lstm(
     """
     # Get the underlying model for accessing parameters
     if isinstance(model, nn.DataParallel):
-        base_model: SudokuLSTM = model.module  # type: ignore[assignment]
+        base_model = cast(SudokuLSTM | SudokuDeepLSTM, model.module)
     else:
-        base_model = model
+        base_model = cast(SudokuLSTM | SudokuDeepLSTM, model)
 
     model.to(device)
 
@@ -524,7 +523,7 @@ def train_lstm(
 
     # LR Warmup scheduler
     effective_warmup = min(warmup_steps, len(train_loader) * num_epochs)
-    
+
     def lr_lambda(step: int) -> float:
         if step < effective_warmup:
             return step / max(1, effective_warmup)
@@ -564,7 +563,6 @@ def train_lstm(
             scaler.step(optimizer)
             scaler.update()
             scheduler.step() # LR Warmup
-            global_step += 1
 
             loss_meter.update(loss.item())
 
@@ -603,7 +601,7 @@ def train_lstm(
 
 @torch.no_grad()
 def evaluate_lstm(
-    model: SudokuLSTM,
+    model: SudokuLSTM | SudokuDeepLSTM,
     dataloader: DataLoader,
     device: torch.device,
 ) -> float:
@@ -649,7 +647,7 @@ except ImportError:
 
 
 def train_sudoku_trm_v2(
-    model: "SudokuTRMv2" | nn.DataParallel,
+    model: SudokuTRMv2 | nn.DataParallel,
     dataloader: DataLoader,
     device: torch.device,
     epochs: int = 1,
@@ -660,7 +658,7 @@ def train_sudoku_trm_v2(
     weight_decay: float = 1.0,
     ema_decay: float = 0.999,
     verbose: bool = True,
-    tracker: Optional["ExperimentTracker"] = None,
+    tracker: ExperimentTracker | None = None,
     test_loader: DataLoader | None = None,
     T_eval: int = 32,
     start_epoch: int = 0,
@@ -701,9 +699,9 @@ def train_sudoku_trm_v2(
     """
     # Get the underlying model for accessing submodules
     if isinstance(model, nn.DataParallel):
-        base_model = model.module
+        base_model = cast(SudokuTRMv2, model.module)
     else:
-        base_model = model
+        base_model = cast(SudokuTRMv2, model)
 
     model.to(device)
     model.train()
@@ -722,8 +720,9 @@ def train_sudoku_trm_v2(
     )
 
     # LR Warmup scheduler
+    num_batches = len(dataloader)
     effective_warmup = min(warmup_steps, num_batches * epochs * N_SUP)
-    
+
     def lr_lambda(step: int) -> float:
         if step < effective_warmup:
             return step / max(1, effective_warmup)
@@ -739,7 +738,6 @@ def train_sudoku_trm_v2(
     ema_trm = EMA(base_model.trm_net, decay=ema_decay)
     ema_head = EMA(base_model.output_head, decay=ema_decay)
 
-    global_step = 0
 
     # Mixed precision setup
     scaler = torch.amp.GradScaler(enabled=use_amp)
@@ -800,7 +798,6 @@ def train_sudoku_trm_v2(
                 scaler.step(optimizer)
                 scaler.update()
                 scheduler.step() # LR Warmup
-                global_step += 1
 
                 # Update EMA
                 ema_trm.update(base_model.trm_net)
@@ -834,9 +831,9 @@ def train_sudoku_trm_v2(
                 x_probe, y_probe = x_probe.to(device), y_probe.to(device)
                 with torch.no_grad():
                     # We probe steps 1 to T_eval (or at least 32)
-                    probe_depths = sorted(list(set([1, 2, 3, 4, 8, 16, 32, T_eval, 64])))
+                    probe_depths = sorted({1, 2, 3, 4, 8, 16, 32, T_eval, 64})
                     probe_depths = [d for d in probe_depths if d <= max(T_eval, 64)]
-                    
+
                     for d in probe_depths:
                         logits_d = base_model(x_probe, T=d, L_cycles=L_cycles)
                         acc_d = (logits_d.argmax(dim=-1) == y_probe).float().mean().item()
@@ -865,7 +862,7 @@ def train_sudoku_trm_v2(
 
 @torch.no_grad()
 def evaluate_trm_v2(
-    model: "SudokuTRMv2",
+    model: SudokuTRMv2,
     dataloader: DataLoader,
     device: torch.device,
     T: int = 32,
