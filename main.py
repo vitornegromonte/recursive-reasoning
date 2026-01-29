@@ -8,6 +8,9 @@ models on the Sudoku task. Supports multi-GPU training via DataParallel.
 
 import argparse
 import json
+import os
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from pathlib import Path
 from typing import Any, cast
 
@@ -336,7 +339,7 @@ def run_trm_v2_experiment(
     num_heads: int = 8,
     num_layers: int = 2,
     num_epochs: int = 20,
-    batch_size: int = 64,
+    batch_size: int = 32,
     num_train_samples: int = 100_000,
     num_test_samples: int = 10_000,
     T_train: int = 8,
