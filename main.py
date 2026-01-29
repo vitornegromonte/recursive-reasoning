@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
+
+# Enable TensorFloat32 for Ampere GPUs
+torch.set_float32_matmul_precision("high")
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
