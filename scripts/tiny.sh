@@ -230,7 +230,7 @@ run_transformer() {
         for seed in "${SEEDS[@]}"; do
             run_experiment "transformer-n${n}-seed${seed}" \
                 --model transformer \
-                --epochs ${EPOCHS_MAP[$n]} \
+                --epochs $((${EPOCHS_MAP[$n]} * $N_SUP)) \
                 --num-train $n \
                 --num-test $NUM_TEST \
                 --batch-size $batch \
@@ -254,7 +254,7 @@ run_lstm() {
         for seed in "${SEEDS[@]}"; do
             run_experiment "lstm-n${n}-seed${seed}" \
                 --model lstm \
-                --epochs ${EPOCHS_MAP[$n]} \
+                --epochs $((${EPOCHS_MAP[$n]} * $N_SUP)) \
                 --num-train $n \
                 --num-test $NUM_TEST \
                 --batch-size $batch \
