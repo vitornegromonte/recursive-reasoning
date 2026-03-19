@@ -269,6 +269,68 @@ def plot_accuracy_curves(
     print(f"Saved accuracy curve plot to {output_path}")
 
 
+def plot_spectral_radiuses(pkl_paths, output_path):
+    import pickle
+    plt.figure(figsize=(10, 6))
+    
+    colors = {"trm": "#E24A33", "transformer": "#348ABD"}
+    
+    for p in pkl_paths:
+        with open(p, 'rb') as f:
+            data = pickle.load(f)
+            
+        rhos = data['rhos']
+        steps = sorted([int(k) for k in rhos.keys()])
+        rho_vals = [rhos[k] for k in steps]
+        
+        name = "TRM" if "trm" in str(p).lower() else "Transformer"
+        color = colors.get(name.lower(), '#555555')
+        
+        plt.plot(steps, rho_vals, marker='o', label=f'{name} $\\rho$', color=color)
+        
+    plt.axhline(1.0, color='black', linestyle='--', label='Criticality ($\\rho = 1$)')
+    plt.title('Jacobian Spectral Radius vs Computation Depth')
+    plt.xlabel('Computational Step / Layer')
+    plt.ylabel('Spectral Radius $\\rho$')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved spectral radius comparison plot to {output_path}")
+
+
+def plot_perturbation_robustness(pkl_path, output_path):
+    import pickle
+    plt.figure(figsize=(10, 6))
+    
+    with open(pkl_path, 'rb') as f:
+        data = pickle.load(f)
+        
+    recovery = data['recovery']
+    mags = sorted([m for m in recovery.keys()])
+    perturb_step = data['perturb_step']
+    
+    for mag in mags:
+        steps = sorted([int(k) for k in recovery[mag].keys()])
+        acc = [recovery[mag][k] for k in steps]
+        label = f'Noise $\\sigma={mag}$' if mag > 0 else 'Baseline'
+        linestyle = '-' if mag == 0 else '--'
+        plt.plot(steps, acc, marker='x' if mag > 0 else 'o', linestyle=linestyle, label=label)
+        
+    plt.axvline(perturb_step, color='red', linestyle=':', label='Perturbation Injected')
+    plt.title('Post-Perturbation Recovery Trajectories (TRM)')
+    plt.xlabel('Computational Step')
+    plt.ylabel('Cell Accuracy')
+    plt.ylim(0, 1.05)
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved perturbation robustness plot to {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize reasoning trajectories")
     parser.add_argument(
@@ -302,17 +364,15 @@ def main():
         help="Number of sample trajectories to plot"
     )
     parser.add_argument(
-        "--accuracy", "-a",
+        "--spectra", "-s",
         type=str,
         nargs="+",
-        help="Paths to trajectory files for accuracy curve plotting"
+        help="Paths to jacobian spectra PKL files to compare"
     )
     parser.add_argument(
-        "--metric",
+        "--robustness", "-r",
         type=str,
-        choices=["cell", "puzzle"],
-        default="cell",
-        help="Metric for accuracy curves: 'cell' or 'puzzle'"
+        help="Path to robustness PKL file to plot"
     )
 
     args = parser.parse_args()
@@ -340,8 +400,18 @@ def main():
             method=args.method,
             num_samples=args.samples,
         )
+    elif args.spectra:
+        plot_spectral_radiuses(
+            args.spectra,
+            args.output
+        )
+    elif args.robustness:
+        plot_perturbation_robustness(
+            args.robustness,
+            args.output
+        )
     else:
-        parser.error("Specify either --trajectories, --compare, or --accuracy")
+        parser.error("Specify either --trajectories, --compare, --accuracy, --spectra, or --robustness")
 
 
 if __name__ == "__main__":

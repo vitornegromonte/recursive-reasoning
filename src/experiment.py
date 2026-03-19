@@ -1,4 +1,6 @@
-"""Logging, checkpointing, and experiment tracking utilities."""
+"""
+Logging, checkpointing, and experiment tracking utilities.
+"""
 
 import csv
 import json
@@ -449,11 +451,19 @@ def load_model_from_checkpoint(
     # Get model config from checkpoint if available
     if "config" in checkpoint:
         config = checkpoint["config"]
-        if "model_dim" in config:
+        if "model_dim" in config and model_class.__name__ == "SudokuTRM":
             model_kwargs.setdefault("trm_dim", config["model_dim"])
 
     model = model_class(**model_kwargs)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    
+    # Strip `_orig_mod.` prefix inserted by torch.compile
+    state_dict = checkpoint["model_state_dict"]
+    clean_state_dict = {}
+    for k, v in state_dict.items():
+        new_k = k.replace("_orig_mod.", "") if k.startswith("_orig_mod.") else k
+        clean_state_dict[new_k] = v
+        
+    model.load_state_dict(clean_state_dict)
     model.to(device)
     model.eval()
 

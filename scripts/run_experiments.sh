@@ -1,17 +1,6 @@
 #!/bin/bash
 # Recursive-Reasoning Experiment Runner
 # Usage: ./scripts/run_experiments.sh [experiment_name]
-#
-# Examples:
-#   ./scripts/run_experiments.sh quick       # Quick test run
-#   ./scripts/run_experiments.sh trm         # TRM experiments
-#   ./scripts/run_experiments.sh transformer # Transformer experiments
-#   ./scripts/run_experiments.sh lstm        # LSTM experiments
-#   ./scripts/run_experiments.sh ablation    # Ablation studies
-#   ./scripts/run_experiments.sh comparison  # Compare all models
-#   ./scripts/run_experiments.sh hpo-trm     # Hyperparameter optimization for TRM
-#   ./scripts/run_experiments.sh hpo-all     # HPO for all models
-#   ./scripts/run_experiments.sh all         # Run all experiments
 
 set -e  # Exit on error
 
@@ -21,7 +10,7 @@ cd "$PROJECT_ROOT"
 
 # Default hyperparameters
 EPOCHS=20
-BATCH_SIZE=64
+BATCH_SIZE=768
 DIM=128
 NUM_TRAIN=100000
 NUM_TEST=10000
@@ -98,12 +87,16 @@ run_trm() {
     
     # Standard TRM training
     run_experiment "trm-standard" \
-        --model trm \
+        --model trm_v2 \
         --epochs $EPOCHS \
         --num-train $NUM_TRAIN \
         --num-test $NUM_TEST \
         --batch-size $BATCH_SIZE \
-        --dim $DIM \
+        --dim 512 \
+        --depth 2 \
+        --t-train 3 \
+        --l-cycles 6 \
+        --mlp-t \
         --lr $LR \
         --puzzle-size $PUZZLE_SIZE
 }

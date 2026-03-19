@@ -56,7 +56,7 @@ PUZZLE_SIZE=9
 DATASET="extreme"
 
 # TRM Config (~5.03M params)
-TRM_V2_DIM=630      # hidden_size
+TRM_V2_DIM=512      # hidden_size
 TRM_V2_HEADS=8      # num_heads (ignored when mlp_t=True)
 TRM_V2_LAYERS=2     # L_layers
 T_TRAIN=3           # H_cycles: improvement steps
@@ -65,26 +65,18 @@ N_SUP=16            # Supervision points per batch
 T_EVAL=42           # "Depth 42" from paper table
 MLP_T=1             # Use MLP token mixing
 
-# Legacy TRM Config (MLP-Mixer based)
-TRM_DIM=368
-TRM_CELL_EMBED=48
-
 # Transformer baseline (~5.07M params, encoder-only)
 TRANSFORMER_DIM=288
 TRANSFORMER_DEPTH=8
 TRANSFORMER_HEADS=8
 TRANSFORMER_DFF=512
 
-# LSTM baseline (~4.97M params, bidirectional)
-LSTM_DIM=128        # Embedding dimension
-LSTM_HIDDEN=288     # Hidden size
-LSTM_LAYERS=3
 
 # Data scarcity regimes
 DATASETS=(1000 3000 10000)
 
 # Random seeds
-SEEDS=(0 1 2)
+SEEDS=(0)
 
 # Batch sizes per dataset
 declare -A BATCH_MAP=(
@@ -265,32 +257,6 @@ run_lstm() {
                 --puzzle-size $PUZZLE_SIZE \
                 --dataset $DATASET \
                 --compile \
-                --seed $seed
-        done
-    done
-}
-
-run_trm() {
-    log "TRM (Legacy) | Data scarcity experiments (T=$T_TRAIN, L_cycles=$L_CYCLES)"
-
-    for n in "${DATASETS[@]}"; do
-        local batch=${BATCH_MAP[$n]}
-        for seed in "${SEEDS[@]}"; do
-            run_experiment "trm-n${n}-seed${seed}" \
-                --model trm \
-                --epochs ${EPOCHS_MAP[$n]} \
-                --num-train $n \
-                --num-test $NUM_TEST \
-                --batch-size $batch \
-                --dim $TRM_DIM \
-                --cell-embed-dim $TRM_CELL_EMBED \
-                --t-train $T_TRAIN \
-                --t-eval $T_EVAL \
-                --n-sup $N_SUP \
-                --l-cycles $L_CYCLES \
-                --lr $LR_TRM \
-                --puzzle-size $PUZZLE_SIZE \
-                --dataset $DATASET \
                 --seed $seed
         done
     done

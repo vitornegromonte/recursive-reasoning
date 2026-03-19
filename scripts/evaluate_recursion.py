@@ -45,7 +45,7 @@ def main():
             model_kwargs = {
                 "hidden_size": config.get("model_dim", 512),
                 "num_heads": config.get("n_heads", 8),
-                "num_layers": config.get("depth", 2),
+                "num_layers": config.get("num_layers", 2),
             }
         else:
             model_class = SudokuTRM
