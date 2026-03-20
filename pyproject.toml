@@ -53,6 +53,7 @@ hpopt = [
 data = [
     "datasets>=2.14.0",
     "huggingface-hub>=0.16.0",
+    "pandas>=2.0.0",
 ]
 all = [
     "recursive-reasoning[dev,notebook,tracking,hpopt,data]",
