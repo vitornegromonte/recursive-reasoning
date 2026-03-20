@@ -117,10 +117,10 @@ class SudokuExtremeDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
 
         # Read CSV with proper dtypes (rating as string to avoid overflow)
         # Columns: source, question, answer, rating
+        # We read the entire file so we can sample randomly rather than sequentially
         self.df = pd.read_csv(
             file_path,
             dtype={"question": str, "answer": str, "rating": str, "source": str},
-            nrows=num_samples,
         )
 
         # Filter by rating if specified (convert to int for comparison)
@@ -132,8 +132,13 @@ class SudokuExtremeDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
                 mask &= ratings >= min_rating
             if max_rating is not None:
                 mask &= ratings <= max_rating
-            self.df = self.df[mask].reset_index(drop=True)
+            self.df = self.df[mask]
 
+        # Randomly subsample if requested to match original TRM methodology
+        if num_samples is not None and num_samples < len(self.df):
+            self.df = self.df.sample(n=num_samples, random_state=42)
+
+        self.df = self.df.reset_index(drop=True)
         self._len = len(self.df)
 
     def __len__(self) -> int:
