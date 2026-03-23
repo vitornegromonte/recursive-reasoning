@@ -635,9 +635,6 @@ def evaluate_lstm(
     return correct / total
 
 
-# =============================================================================
-# SudokuTRMv2 Training (Transformer-based operator)
-# =============================================================================
 
 # Import SudokuTRMv2
 try:
@@ -824,21 +821,23 @@ def train_sudoku_trm_v2(
 
             val_acc = evaluate_trm_v2(base_model, test_loader, device, T=T_eval, L_cycles=L_cycles)
 
-            # --- Figures 2 & 3: Thinking Trajectory Probing ---
+            # Thinking Trajectory Probing
             # Probe a single batch to see how accuracy improves with depth
             if tracker is not None:
                 # Mechanistic Interpretability: Logarithmic Checkpointing and Latent Traps
                 is_log_epoch = (actual_epoch + 1) in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-                is_save_epoch = (actual_epoch + 1) % 50 == 0
+                is_save_epoch = (actual_epoch + 1) % 1000 == 0
 
                 if is_log_epoch or is_save_epoch:
                     tracker.save_checkpoint(f"epoch_{actual_epoch + 1}.pt", optimizer=optimizer)
 
                 x_probe, y_probe = next(iter(test_loader))
-                x_probe, y_probe = x_probe.to(device), y_probe.to(device)
+                # Slice to 5 samples
+                x_probe = x_probe[:5].to(device)
+                y_probe = y_probe[:5].to(device)
                 import torch._dynamo
                 with torch.no_grad(), torch._dynamo.disable():
-                    # 1. Save full mechanistics trajectory for the probe
+                    # Save full mechanistics trajectory for the probe
                     if is_log_epoch or is_save_epoch:
                         _, traj = base_model(x_probe, T=T_eval, L_cycles=L_cycles, return_trajectory=True)
                         traj_path = tracker.log_dir / f"latents_epoch_{actual_epoch + 1}.pt"
@@ -852,7 +851,7 @@ def train_sudoku_trm_v2(
                             traj_path
                         )
 
-                    # 2. Continual RSI probing analysis
+                    # Continual RSI probing analysis
                     probe_depths = sorted({1, 2, 3, 4, 8, 16, 32, T_eval, 64})
                     probe_depths = [d for d in probe_depths if d <= max(T_eval, 64)]
 
