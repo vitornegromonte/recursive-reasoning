@@ -12,10 +12,10 @@ cd "$PROJECT_ROOT"
 EPOCHS=20
 BATCH_SIZE=768
 DIM=128
-NUM_TRAIN=100000
-NUM_TEST=10000
 LR=1e-4
-PUZZLE_SIZE=4  # 4 for 4x4, 9 for 9x9, 16 for 16x16
+PUZZLE_SIZE=9  # 4 for 4x4, 9 for 9x9, 16 for 16x16
+SEED=0         # Seed for reproducibility
+DATASET="extreme"
 
 # Multi-GPU settings
 NUM_WORKERS=0  # 0 for auto-detect
@@ -59,6 +59,9 @@ run_experiment() {
     cmd="$cmd --num-workers $NUM_WORKERS"
     [[ $SCALE_LR -eq 0 ]] && cmd="$cmd --no-scale-lr"
     
+    # Add random seed
+    cmd="$cmd --seed $SEED"
+    
     log "Running: $cmd"
     eval "$cmd"
     
@@ -83,22 +86,36 @@ run_quick() {
 
 # TRM experiments
 run_trm() {
-    log " TRM Experiments "
+    log " TRM Experiments (Manual Data Sweep) "
     
-    # Standard TRM training
-    run_experiment "trm-standard" \
-        --model trm_v2 \
-        --epochs $EPOCHS \
-        --num-train $NUM_TRAIN \
-        --num-test $NUM_TEST \
-        --batch-size $BATCH_SIZE \
-        --dim 512 \
-        --depth 2 \
-        --t-train 3 \
-        --l-cycles 6 \
-        --mlp-t \
-        --lr $LR \
-        --puzzle-size $PUZZLE_SIZE
+    # User-specified sweep: 1k (19k epochs), 5k (8.5k epochs), 10k (6k epochs)
+    local NUM_TRAIN_LIST=(1000 5000 10000)
+    local EPOCHS_LIST=(19000 8500 6000)
+    local B_SIZE=768
+    local NUM_TEST=10000
+
+    for i in "${!NUM_TRAIN_LIST[@]}"; do
+        local N_TRAIN=${NUM_TRAIN_LIST[$i]}
+        local EPOCHS=${EPOCHS_LIST[$i]}
+        
+        log "Dataset: ${N_TRAIN} | Batch: ${B_SIZE} | Epochs: ${EPOCHS}"
+
+        # Standard TRM training
+        run_experiment "trm-standard-n${N_TRAIN}" \
+            --model trm_v2 \
+            --epochs $EPOCHS \
+            --num-train $N_TRAIN \
+            --num-test $NUM_TEST \
+            --batch-size $B_SIZE \
+            --dim 512 \
+            --depth 2 \
+            --t-train 3 \
+            --l-cycles 6 \
+            --mlp-t \
+            --lr $LR \
+            --puzzle-size $PUZZLE_SIZE \
+            --dataset $DATASET
+    done
 }
 
 # Transformer baseline experiments
@@ -108,22 +125,6 @@ run_transformer() {
     # Standard Transformer training
     run_experiment "transformer-standard" \
         --model transformer \
-        --epochs $EPOCHS \
-        --num-train $NUM_TRAIN \
-        --num-test $NUM_TEST \
-        --batch-size $BATCH_SIZE \
-        --dim $DIM \
-        --lr 3e-4 \
-        --puzzle-size $PUZZLE_SIZE
-}
-
-# LSTM baseline experiments
-run_lstm() {
-    log " LSTM Experiments "
-    
-    # Standard LSTM training
-    run_experiment "lstm-standard" \
-        --model lstm \
         --epochs $EPOCHS \
         --num-train $NUM_TRAIN \
         --num-test $NUM_TEST \

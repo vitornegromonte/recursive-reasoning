@@ -200,7 +200,7 @@ class SudokuTRM(nn.Module):
 
         Args:
             trm_dim: Latent dimension for TRM states.
-            cell_dim: Input dimension per cell (n+1 for n×n Sudoku).
+            cell_dim: Input dimension per cell (n+1 for nxn Sudoku).
             cell_embed_dim: Intermediate embedding dimension per cell.
             num_cells: Number of cells in the puzzle (n²).
             num_digits: Number of possible digits (n).
@@ -321,9 +321,9 @@ class SudokuTRMv2(nn.Module):
             hidden_size: Model dimension.
             num_heads: Number of attention heads (ignored if mlp_t=True).
             num_layers: Number of transformer blocks in operator (L_layers).
-            cell_dim: Input dimension per cell (n+1 for n×n Sudoku).
+            cell_dim: Input dimension per cell (n+1 for nxn Sudoku).
             num_cells: Number of cells in the puzzle (n²).
-            num_digits: Number of possible digits (n for n×n Sudoku).
+            num_digits: Number of possible digits (n for nxn Sudoku).
             expansion: FFN expansion factor.
             rms_norm_eps: RMS normalization epsilon.
             mlp_t: If True, use MLP for token mixing instead of attention.
@@ -425,7 +425,7 @@ class SudokuTRMv2(nn.Module):
         # Initialize latent states with learned values
         z_H, z_L = self.init_state(batch_size, seq_len, device)
 
-        trajectory: list[torch.Tensor] = []
+        trajectory: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         # Recursive reasoning
         for _ in range(T):
@@ -436,7 +436,7 @@ class SudokuTRMv2(nn.Module):
             z_H = self.trm_net(z_H, z_L)
 
             if return_trajectory:
-                trajectory.append(z_H.detach().clone())
+                trajectory.append((z_H.detach().clone(), z_L.detach().clone()))
 
         # Output logits
         logits = self.output_head(z_H)
