@@ -26,7 +26,7 @@ module load Python/3.10.8-GCCcore-12.2.0
 # -------------------------------------------------------------
 # 2. Ativar o Ambiente Virtual do Usuário
 # -------------------------------------------------------------
-source ~/envs/trm_env/bin/activate
+source ~/envs/trm/bin/activate
 echo "Ambiente ativado: $VIRTUAL_ENV"
 
 if ! command -v nvidia-smi &> /dev/null; then
