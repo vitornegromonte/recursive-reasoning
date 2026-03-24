@@ -9,7 +9,7 @@
 #SBATCH -o job.log
 #SBATCH -o trm_training.out
 #SBATCH -e trm_training.err
-#SBATCH --time=12:00:00
+#SBATCH --time=48:00:00
 
 set -eo pipefail
 
@@ -18,8 +18,16 @@ echo "Nó: $(hostname)"
 echo "Usuário: $USER"
 echo "Data/Hora: $(date)"
 
-export PYTORCH_ALLOC_CONF=expandable_segments:True
-~/recursive-reasoning/scripts/run_experiments.sh trm
+# -------------------------------------------------------------
+# 1. Carregar módulos do cluster (Obrigatório conforme a documentação)
+# -------------------------------------------------------------
+module load Python/3.10.8-GCCcore-12.2.0
+
+# -------------------------------------------------------------
+# 2. Ativar o Ambiente Virtual do Usuário
+# -------------------------------------------------------------
+source ~/envs/trm_env/bin/activate
+echo "Ambiente ativado: $VIRTUAL_ENV"
 
 if ! command -v nvidia-smi &> /dev/null; then
     echo "nvidia-smi não encontrado — GPU pode não estar disponível neste nó."
@@ -27,11 +35,13 @@ else
     nvidia-smi || echo "Falha ao listar GPUs (pode ser ruído temporário)."
 fi
 
-
 PROJECT_DIR="$HOME/recursive-reasoning"
 cd "$PROJECT_DIR" || { echo " Diretório $PROJECT_DIR não encontrado"; exit 1; }
 
-uv run python3 - <<'EOF'
+# -------------------------------------------------------------
+# 3. Teste Rápido de Detecção de GPU usando Python Nativo (Sem uv)
+# -------------------------------------------------------------
+python3 - <<'EOF'
 import torch, sys
 print(f"Torch versão: {torch.__version__}")
 print(f"Python: {sys.executable}")
@@ -46,10 +56,16 @@ if [ ! -f "main.py" ]; then
     exit 1
 fi
 
-# Força o PyTorch a usar CUDA (ou as GPUs disponíveis)
+# -------------------------------------------------------------
+# 4. Configurar Alocação de Memória PyTorch e Fixar GPU Unica
+# -------------------------------------------------------------
 export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_ALLOC_CONF=expandable_segments:True
 
-# Rodar via script de experimentos usando o uv
+# -------------------------------------------------------------
+# 5. Lançar o Experimento
+# -------------------------------------------------------------
+echo "Iniciando run_experiments.sh..."
 ./scripts/run_experiments.sh trm || { echo " Erro na execução do script"; exit 1; }
 
 echo "Job finalizado com sucesso!"
