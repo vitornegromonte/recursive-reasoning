@@ -506,7 +506,14 @@ def run_trm_v2_experiment(
     if compile:
         try:
             print("Compiling model (this may take a few minutes)...")
-            model = torch.compile(model)
+            base = model.module if hasattr(model, 'module') else model
+            if hasattr(base, 'trm_net'):
+                base.trm_net = torch.compile(base.trm_net)
+                base.embed = torch.compile(base.embed)
+                if hasattr(base, 'output_head'):
+                    base.output_head = torch.compile(base.output_head)
+            else:
+                model = torch.compile(model)
         except Exception as e:
             print(f"Warning: torch.compile failed: {e}. Proceeding without compilation.")
 
@@ -1274,7 +1281,10 @@ def main() -> None:
         )
 
     if args.model in ("trm_v2", "all"):
-        print("\nTRM V2 (Transformer-based) EXPERIMENT\n")
+        if args.mlp_t:
+            print("\nTRM (MLP-Mixer based) EXPERIMENT\n")
+        else:
+            print("\nTRM (Attention-based) EXPERIMENT\n")
         run_trm_v2_experiment(
             device_info=device_info,
             puzzle_size=args.puzzle_size,

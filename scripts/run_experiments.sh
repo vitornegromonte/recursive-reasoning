@@ -10,7 +10,7 @@ cd "$PROJECT_ROOT"
 
 # Default hyperparameters
 EPOCHS=20
-BATCH_SIZE=768
+BATCH_SIZE=64
 DIM=128
 LR=1e-4
 PUZZLE_SIZE=9  # 4 for 4x4, 9 for 9x9, 16 for 16x16
@@ -43,8 +43,8 @@ run_experiment() {
     log "Starting experiment: $name"
     log "Arguments: ${args[*]}"
     
-    # Build command (using uv run for proper environment)
-    local cmd="uv run python main.py ${args[*]}"
+    # Build command
+    local cmd="python3 main.py ${args[*]}"
     
     # Add wandb if enabled
     if [[ $USE_WANDB -eq 1 ]]; then
@@ -91,7 +91,7 @@ run_trm() {
     # User-specified sweep: 1k (19k epochs), 5k (8.5k epochs), 10k (6k epochs)
     local NUM_TRAIN_LIST=(1000 5000 10000)
     local EPOCHS_LIST=(19000 8500 6000)
-    local B_SIZE=768
+    local B_SIZE=64
     local NUM_TEST=10000
 
     for i in "${!NUM_TRAIN_LIST[@]}"; do
@@ -233,7 +233,7 @@ run_hpo() {
     local model=$1
     log " HPO for $model "
     
-    local cmd="uv run python scripts/run_hpo.py"
+    local cmd="python3 scripts/run_hpo.py"
     cmd="$cmd --model $model"
     cmd="$cmd --puzzle-size $PUZZLE_SIZE"
     cmd="$cmd --n-trials $HPO_TRIALS"
@@ -271,7 +271,7 @@ main() {
     
     log "Project root: $PROJECT_ROOT"
     log "Experiment: $experiment"
-    log "Device: $(uv run python -c 'import torch; print("cuda" if torch.cuda.is_available() else "cpu")')"
+    log "Device: $(python3 -c 'import torch; print("cuda" if torch.cuda.is_available() else "cpu")')"
     echo ""
     
     case $experiment in

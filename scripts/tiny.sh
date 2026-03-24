@@ -80,16 +80,16 @@ SEEDS=(0)
 
 # Batch sizes per dataset
 declare -A BATCH_MAP=(
-  [1000]=256
-  [3000]=256
-  [10000]=512
+  [1000]=64
+  [3000]=64
+  [10000]=64
 )
 
 # Epoch schedule (Matched for ~200k gradient steps)
 declare -A EPOCHS_MAP=(
-  [1000]=3125     # 1000/256 ≈ 4 batches * 3125 epochs * 16 steps/batch ≈ 200k steps
-  [3000]=1062     # 3000/256 ≈ 12 batches * 1062 epochs * 16 steps/batch ≈ 200k steps
-  [10000]=625     # 10000/512 ≈ 20 batches * 625 epochs * 16 steps/batch ≈ 200k steps
+  [1000]=781      # 1000/64 ≈ 16 batches * 781 epochs * 16 steps/batch ≈ 200k steps
+  [3000]=266      # 3000/64 ≈ 47 batches * 266 epochs * 16 steps/batch ≈ 200k steps
+  [10000]=80      # 10000/64 ≈ 157 batches * 80 epochs * 16 steps/batch ≈ 200k steps
 )
 
 # Learning rates

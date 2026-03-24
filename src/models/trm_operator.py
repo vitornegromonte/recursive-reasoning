@@ -84,7 +84,7 @@ def apply_rotary_pos_emb(
 class SwiGLU(nn.Module):
     """SwiGLU feedforward network."""
 
-    def __init__(self, hidden_size: int, expansion: float = 8 / 3):
+    def __init__(self, hidden_size: int, expansion: float = 4.0):
         """
         Initialize SwiGLU.
 
@@ -193,7 +193,7 @@ class TRMBlock(nn.Module):
         hidden_size: int,
         num_heads: int,
         seq_len: int = 81,
-        expansion: float = 8 / 3,
+        expansion: float = 4.0,
         rms_norm_eps: float = 1e-5,
         mlp_t: bool = False,
     ):
@@ -279,7 +279,7 @@ class TRMOperator(nn.Module):
         num_heads: int,
         num_layers: int = 2,
         max_seq_len: int = 128,
-        expansion: float = 8 / 3,
+        expansion: float = 4.0,
         rms_norm_eps: float = 1e-5,
         mlp_t: bool = False,
     ):

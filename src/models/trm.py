@@ -310,7 +310,7 @@ class SudokuTRMv2(nn.Module):
         cell_dim: int = 10,
         num_cells: int = 81,
         num_digits: int = 9,
-        expansion: float = 8 / 3,
+        expansion: float = 4.0,  # 4.0 exactly matches the original paper's 5M parameter target
         rms_norm_eps: float = 1e-5,
         mlp_t: bool = True,  # Default True for Sudoku (outperforms attention)
     ):

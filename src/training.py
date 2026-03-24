@@ -6,6 +6,7 @@ from typing import cast
 
 import torch
 import torch.nn as nn
+import torch._dynamo as _dynamo
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -835,8 +836,10 @@ def train_sudoku_trm_v2(
                 # Slice to 5 samples
                 x_probe = x_probe[:5].to(device)
                 y_probe = y_probe[:5].to(device)
-                import torch._dynamo
-                with torch.no_grad(), torch._dynamo.disable():
+                import torch._dynamo as _dynamo
+                
+                @_dynamo.disable
+                def _run_probes():
                     # Save full mechanistics trajectory for the probe
                     if is_log_epoch or is_save_epoch:
                         _, traj = base_model(x_probe, T=T_eval, L_cycles=L_cycles, return_trajectory=True)
@@ -860,6 +863,9 @@ def train_sudoku_trm_v2(
                         acc_d = (logits_d.argmax(dim=-1) == y_probe).float().mean().item()
                         loss_d = loss_fn(logits_d.view(-1, logits_d.size(-1)), y_probe.view(-1)).item()
                         tracker.log_recursion(actual_epoch + 1, d, loss_d, acc_d)
+
+                with torch.no_grad():
+                    _run_probes()
 
         if tracker is not None:
             tracker.log_epoch(
