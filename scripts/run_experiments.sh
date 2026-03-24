@@ -10,7 +10,7 @@ cd "$PROJECT_ROOT"
 
 # Default hyperparameters
 EPOCHS=20
-BATCH_SIZE=64
+BATCH_SIZE=768
 DIM=128
 LR=1e-4
 PUZZLE_SIZE=9  # 4 for 4x4, 9 for 9x9, 16 for 16x16
@@ -88,9 +88,9 @@ run_quick() {
 run_trm() {
     log " TRM Experiments (Manual Data Sweep) "
     
-    # User-specified sweep: 1k (19k epochs), 5k (8.5k epochs), 10k (6k epochs)
+    # User-specified sweep: 1k (782 epochs), 5k (158 epochs), 10k (80 epochs)
     local NUM_TRAIN_LIST=(1000 5000 10000)
-    local EPOCHS_LIST=(19000 8500 6000)
+    local EPOCHS_LIST=(782 158 80)
     local B_SIZE=64
     local NUM_TEST=10000
 
@@ -114,7 +114,9 @@ run_trm() {
             --mlp-t \
             --lr $LR \
             --puzzle-size $PUZZLE_SIZE \
-            --dataset $DATASET
+            --dataset $DATASET \
+            --compile \
+            --log-recursion
     done
 }
 

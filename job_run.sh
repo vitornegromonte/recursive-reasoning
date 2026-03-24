@@ -18,14 +18,10 @@ echo "Nó: $(hostname)"
 echo "Usuário: $USER"
 echo "Data/Hora: $(date)"
 
-# -------------------------------------------------------------
-# 1. Carregar módulos do cluster (Obrigatório conforme a documentação)
-# -------------------------------------------------------------
+# Carregar módulos do cluster
 module load Python/3.10.8-GCCcore-12.2.0
 
-# -------------------------------------------------------------
-# 2. Ativar o Ambiente Virtual do Usuário
-# -------------------------------------------------------------
+# Ativar o Ambiente Virtual do Usuário
 source ~/envs/trm/bin/activate
 echo "Ambiente ativado: $VIRTUAL_ENV"
 
@@ -38,9 +34,7 @@ fi
 PROJECT_DIR="$HOME/recursive-reasoning"
 cd "$PROJECT_DIR" || { echo " Diretório $PROJECT_DIR não encontrado"; exit 1; }
 
-# -------------------------------------------------------------
-# 3. Teste Rápido de Detecção de GPU usando Python Nativo (Sem uv)
-# -------------------------------------------------------------
+# Teste Rápido de Detecção de GPU usando Python Nativo (Sem uv)
 python3 - <<'EOF'
 import torch, sys
 print(f"Torch versão: {torch.__version__}")
@@ -56,15 +50,11 @@ if [ ! -f "main.py" ]; then
     exit 1
 fi
 
-# -------------------------------------------------------------
-# 4. Configurar Alocação de Memória PyTorch e Fixar GPU Unica
-# -------------------------------------------------------------
+# Configurar Alocação de Memória PyTorch e Fixar GPU Unica
 export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
-# -------------------------------------------------------------
-# 5. Lançar o Experimento
-# -------------------------------------------------------------
+# Lançar o Experimento
 echo "Iniciando run_experiments.sh..."
 ./scripts/run_experiments.sh trm || { echo " Erro na execução do script"; exit 1; }
 
