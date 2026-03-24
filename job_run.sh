@@ -18,6 +18,9 @@ echo "Nó: $(hostname)"
 echo "Usuário: $USER"
 echo "Data/Hora: $(date)"
 
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+~/recursive-reasoning/scripts/run_experiments.sh trm
+
 if ! command -v nvidia-smi &> /dev/null; then
     echo "nvidia-smi não encontrado — GPU pode não estar disponível neste nó."
 else
