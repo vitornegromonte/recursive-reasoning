@@ -1,7 +1,49 @@
 """Utility classes and functions for training."""
 
+import math
 import torch
 import torch.nn as nn
+
+
+def trunc_normal_init_(
+    tensor: torch.Tensor,
+    std: float = 1.0,
+    lower: float = -2.0,
+    upper: float = 2.0,
+) -> torch.Tensor:
+    """JAX/Flax-compatible truncated normal initialization.
+
+    PyTorch's ``nn.init.trunc_normal_`` is *not* mathematically correct —
+    the actual standard deviation of the resulting tensor is smaller than the
+    requested ``std`` because the truncation is applied *after* sampling.
+    This function is a PyTorch port of the JAX implementation which compensates
+    for this shrinkage, matching Flax's default weight initializer.
+
+    References:
+        https://github.com/jax-ml/jax/blob/main/jax/_src/random.py#L807-L848
+        https://github.com/jax-ml/jax/blob/main/jax/_src/nn/initializers.py#L162-L199
+    """
+    with torch.no_grad():
+        if std == 0:
+            tensor.zero_()
+        else:
+            sqrt2 = math.sqrt(2)
+            a = math.erf(lower / sqrt2)
+            b = math.erf(upper / sqrt2)
+            z = (b - a) / 2
+
+            c = (2 * math.pi) ** -0.5
+            pdf_u = c * math.exp(-0.5 * upper ** 2)
+            pdf_l = c * math.exp(-0.5 * lower ** 2)
+            comp_std = std / math.sqrt(
+                1 - (upper * pdf_u - lower * pdf_l) / z - ((pdf_u - pdf_l) / z) ** 2
+            )
+
+            tensor.uniform_(a, b)
+            tensor.erfinv_()
+            tensor.mul_(sqrt2 * comp_std)
+            tensor.clip_(lower * comp_std, upper * comp_std)
+    return tensor
 
 
 class EMA:

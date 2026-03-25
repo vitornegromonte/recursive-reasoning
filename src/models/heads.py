@@ -4,13 +4,10 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-
-def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0) -> torch.Tensor:
-    """Truncated normal initialization."""
-    with torch.no_grad():
-        nn.init.trunc_normal_(tensor, std=std, a=-2 * std, b=2 * std)
-    return tensor
+from .utils import trunc_normal_init_
+from .trm_operator import CastedLinear  # LeCun init + dtype-casting linear
 
 
 class OutputHead(nn.Module):
@@ -119,10 +116,8 @@ class SudokuSequenceEmbedding(nn.Module):
         self.embed_scale = math.sqrt(hidden_size)
         embed_init_std = 1.0 / self.embed_scale
 
-        # Token embedding: project each cell to hidden_size
-        self.embed_tokens = nn.Linear(cell_dim, hidden_size, bias=False)
-        # Initialize with truncated normal
-        trunc_normal_init_(self.embed_tokens.weight, std=embed_init_std)
+        # Token embedding: project each cell to hidden_size (CastedLinear: LeCun init + dtype cast)
+        self.embed_tokens = CastedLinear(cell_dim, hidden_size, bias=False, init_std=embed_init_std)
 
         # Learned positional embeddings
         if use_learned_pos:
@@ -214,7 +209,7 @@ class SudokuSequenceOutputHead(nn.Module):
             num_digits: Number of possible digits (n for n×n Sudoku).
         """
         super().__init__()
-        self.lm_head = nn.Linear(hidden_size, num_digits, bias=False)
+        self.lm_head = CastedLinear(hidden_size, num_digits, bias=False)
 
     def forward(self, y: torch.Tensor) -> torch.Tensor:
         """

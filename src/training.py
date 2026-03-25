@@ -664,26 +664,20 @@ def train_sudoku_trm_v2(
     warmup_steps: int = 0,
 ) -> None:
     """
-    Train a Sudoku TRM V2 model (Transformer-based) with deep supervision.
+    Train a Sudoku TRM model matching the original.
 
-    Similar to train_sudoku_trm but for the new architecture with:
-    - Transformer-based operator (self-attention + RoPE)
-    - Sequence-shaped latent states (batch, num_cells, hidden_size)
-    - Learned state initialization
-
-    Training scheme matches the original TinyRecursiveModels:
-    1. Run T-1 improvement steps WITHOUT gradients
-    2. Run 1 final improvement step WITH gradients
-    3. Compute loss and backpropagate
-    4. Repeat N_SUP times per batch
+    - Initial state (z_H, z_L) is reset *per batch*.
+    - Per batch, the model undergoes N_SUP supervision iterations.
+    - Each supervision iteration (deep recursion): runs T-1 steps under no_grad(), followed by 1 step with gradients, then computes loss and steps the optimizer.
+    - Thus, there are N_SUP optimizer steps per batch.
 
     Args:
         model: The SudokuTRMv2 model to train (can be DataParallel wrapped).
         dataloader: Training data loader.
         device: Device to train on.
         epochs: Number of training epochs.
-        T: Number of improvement steps per supervision (H_cycles in paper).
-        N_SUP: Number of supervision points per batch.
+        T: Number of reasoning steps per supervision point (T-1 no_grad, 1 grad).
+        N_SUP: Number of supervision points (and optimizer steps) per batch.
         L_cycles: Number of latent updates per improvement step.
         lr: Learning rate.
         weight_decay: Weight decay for AdamW.
@@ -719,7 +713,7 @@ def train_sudoku_trm_v2(
 
     # LR Warmup scheduler
     num_batches = len(dataloader)
-    effective_warmup = min(warmup_steps, num_batches * epochs * N_SUP)
+    effective_warmup = min(warmup_steps, num_batches * epochs)  # 1 step per batch
 
     def lr_lambda(step: int) -> float:
         if step < effective_warmup:
@@ -757,62 +751,64 @@ def train_sudoku_trm_v2(
 
         iterator = tqdm(dataloader, desc=f"Epoch {actual_epoch + 1}") if verbose else dataloader
 
+        # Carry state — persists across batches AND across N_SUP supervision points.
+        # Deep supervision: we apply N_SUP supervision signals per batch, each after T steps.
+        # The carry flows through all of them, giving the model increasingly refined states to supervise.
+        z_H: torch.Tensor | None = None
+        z_L: torch.Tensor | None = None
+
         for x_raw, y_target in iterator:
             x_raw = x_raw.to(device)
             y_target = y_target.to(device)
 
             batch_size = x_raw.size(0)
+            seq_len = base_model.num_cells
 
-            # Embed input once (no gradients needed for embedding)
+            # Initialize carry state PER BATCH (matches paper's Deep Supervision pseudocode)
+            z_H, z_L = base_model.init_state(batch_size, seq_len, device)
+
+            # Embed input once per batch — no gradient needed (fixed during recursion)
             with torch.no_grad():
                 x_emb = base_model.embed(x_raw)  # (batch, num_cells, hidden_size)
 
-            seq_len = x_emb.size(1)
-
-            # Initialize latent states with learned values
-            z_H, z_L = base_model.init_state(batch_size, seq_len, device)
-
-            for _ in range(N_SUP):
-                # Run T-1 improvement steps without gradients
+            # Deep supervision: N_SUP supervision points per batch.
+            for sup_idx in range(N_SUP):
+                # 1. Run T-1 steps without gradients (improve state, no gradients needed)
                 with torch.no_grad():
                     for _ in range(T - 1):
                         for _ in range(L_cycles):
                             z_L = base_model.trm_net(x_emb, z_H, z_L)
                         z_H = base_model.trm_net(z_H, z_L)
 
-                # Final improvement step with gradients
+                # 2. ONE pass with gradients to improve state and compute loss
                 optimizer.zero_grad()
                 with autocast_ctx:
                     for _ in range(L_cycles):
                         z_L = base_model.trm_net(x_emb, z_H, z_L)
                     z_H = base_model.trm_net(z_H, z_L)
 
-                    # Compute loss
                     logits = base_model.output_head(z_H)
                     loss = loss_fn(logits.view(-1, logits.size(-1)), y_target.view(-1))
 
-                # Backpropagate with gradient scaling
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step() # LR Warmup
+                scheduler.step()  # One LR step per supervision point
 
-                # Update EMA
+                # EMA update per supervision point
                 ema_trm.update(base_model.trm_net)
                 ema_head.update(base_model.output_head)
 
+                # Detach carry before next supervision point (prevent graph accumulation)
+                z_H = z_H.detach()
+                z_L = z_L.detach()
+
                 loss_meter.update(loss.item())
 
-                # Track step
                 if tracker is not None:
                     tracker.step()
                     if tracker.global_step % log_every == 0:
                         tracker.log_metrics({"loss": loss.item()}, prefix="train")
-
-                # Detach state for next supervision step
-                z_H = z_H.detach()
-                z_L = z_L.detach()
-
         # End of epoch
         val_acc = None
         if test_loader is not None:

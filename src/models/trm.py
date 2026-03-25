@@ -4,6 +4,8 @@
 import torch
 import torch.nn as nn
 
+from .utils import trunc_normal_init_
+
 
 def latent_recursion(
     net: nn.Module,
@@ -282,11 +284,8 @@ def latent_recursion_seq(
     return y, z
 
 
-def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0) -> torch.Tensor:
-    """Truncated normal initialization."""
-    with torch.no_grad():
-        nn.init.trunc_normal_(tensor, std=std, a=-2 * std, b=2 * std)
-    return tensor
+# trunc_normal_init_ is imported from .utils — see that module for the
+# JAX/Flax-compatible implementation.
 
 
 class SudokuTRMv2(nn.Module):
@@ -365,13 +364,14 @@ class SudokuTRMv2(nn.Module):
             num_digits=num_digits,
         )
 
-        # Learned initial states (like original)
-        # Initialize with truncated normal, std=1
-        self.H_init = nn.Parameter(
-            trunc_normal_init_(torch.empty(hidden_size), std=1.0)
+        # Learned initial states: persistent non-trainable buffers (matches original TRM exactly).
+        # Stored in bfloat16 so that init_state produces the correct compute dtype under AMP.
+        # Original uses nn.Buffer (excluded from Adam, saved in state_dict).
+        self.register_buffer(
+            "H_init", trunc_normal_init_(torch.empty(hidden_size, dtype=torch.bfloat16), std=1.0)
         )
-        self.L_init = nn.Parameter(
-            trunc_normal_init_(torch.empty(hidden_size), std=1.0)
+        self.register_buffer(
+            "L_init", trunc_normal_init_(torch.empty(hidden_size, dtype=torch.bfloat16), std=1.0)
         )
 
     def init_state(
@@ -391,10 +391,11 @@ class SudokuTRMv2(nn.Module):
         Returns:
             Tuple of (z_H, z_L) tensors of shape (batch, seq_len, hidden_size).
         """
-        # Expand learned init to full shape
-        z_H = self.H_init.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1)
-        z_L = self.L_init.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1)
-        return z_H.clone(), z_L.clone()
+        # Expand learned init to full shape, then cast to bfloat16 (matching original's forward_dtype).
+        # Using .contiguous() after expand ensures a writable tensor without a full copy on GPU.
+        z_H = self.H_init.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1).contiguous()
+        z_L = self.L_init.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1).contiguous()
+        return z_H, z_L
 
     def forward(
         self,

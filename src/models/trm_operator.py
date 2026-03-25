@@ -7,9 +7,12 @@ This implements the recursive reasoning block using:
 """
 
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from .utils import trunc_normal_init_
 
 
 def rms_norm(hidden_states: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
@@ -63,6 +66,10 @@ def apply_rotary_pos_emb(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply rotary position embedding to queries and keys.
 
+    Matches the original TinyRecursiveModels layers.py: cast q/k to cos.dtype
+    before applying RoPE to avoid precision issues under bfloat16/AMP, then
+    restore the original dtype.
+
     Args:
         q: Query tensor of shape (batch, seq_len, num_heads, head_dim).
         k: Key tensor of shape (batch, seq_len, num_heads, head_dim).
@@ -70,15 +77,54 @@ def apply_rotary_pos_emb(
         sin: Sine embeddings of shape (seq_len, head_dim).
 
     Returns:
-        Rotated q and k tensors.
+        Rotated q and k tensors in the original dtype.
     """
-    # Reshape cos/sin for broadcasting: (seq_len, 1, head_dim)
-    cos = cos.unsqueeze(1)
-    sin = sin.unsqueeze(1)
+    orig_dtype = q.dtype
+    q = q.to(cos.dtype)
+    k = k.to(cos.dtype)
+
+    # cos/sin: (seq_len, head_dim) → expand to (seq_len, 1, head_dim) for
+    # broadcasting against (batch, seq_len, num_heads, head_dim)
+    cos = cos.unsqueeze(-2)  # matches original: cos.unsqueeze(-2)
+    sin = sin.unsqueeze(-2)
 
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
+    return q_embed.to(orig_dtype), k_embed.to(orig_dtype)
+
+
+def _find_multiple(a: int, b: int) -> int:
+    """Find smallest multiple of b >= a (ceiling division)."""
+    return (-(a // -b)) * b
+
+
+class CastedLinear(nn.Module):
+    """Linear layer matching TRM original: LeCun truncated normal init + explicit dtype casting.
+
+    Key differences from nn.Linear:
+    - Weight init: truncated normal with std=1/sqrt(in_features) (LeCun), not Kaiming uniform
+    - Forward: explicitly casts weight to input dtype, preventing AMP precision issues
+    """
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, init_std: float | None = None):
+        super().__init__()
+        std = init_std if init_std is not None else (1.0 / math.sqrt(in_features))
+        self.weight = nn.Parameter(
+            self._lecun_init(torch.empty(out_features, in_features), std=std)
+        )
+        self.bias_param = nn.Parameter(torch.zeros(out_features)) if bias else None
+
+    @staticmethod
+    def _lecun_init(tensor: torch.Tensor, std: float | None = None) -> torch.Tensor:
+        if std is None:
+            std = 1.0 / math.sqrt(tensor.size(1))
+        with torch.no_grad():
+            nn.init.trunc_normal_(tensor, std=std, a=-2 * std, b=2 * std)
+        return tensor
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bias = self.bias_param.to(x.dtype) if self.bias_param is not None else None
+        return F.linear(x, self.weight.to(x.dtype), bias)
 
 
 class SwiGLU(nn.Module):
@@ -94,13 +140,9 @@ class SwiGLU(nn.Module):
         """
         super().__init__()
         # Round to multiple of 256 for efficiency (like original)
-        intermediate = self._find_multiple(round(expansion * hidden_size * 2 / 3), 256)
-        self.gate_up_proj = nn.Linear(hidden_size, intermediate * 2, bias=False)
-        self.down_proj = nn.Linear(intermediate, hidden_size, bias=False)
-
-    @staticmethod
-    def _find_multiple(a: int, b: int) -> int:
-        return (-(a // -b)) * b
+        intermediate = _find_multiple(round(expansion * hidden_size * 2 / 3), 256)
+        self.gate_up_proj = CastedLinear(hidden_size, intermediate * 2, bias=False)
+        self.down_proj = CastedLinear(intermediate, hidden_size, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
@@ -130,9 +172,9 @@ class TRMAttention(nn.Module):
         self.head_dim = head_dim or hidden_size // num_heads
         self.output_size = self.head_dim * num_heads
 
-        # Combined QKV projection
-        self.qkv_proj = nn.Linear(hidden_size, 3 * self.num_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.output_size, hidden_size, bias=False)
+        # Combined QKV projection (CastedLinear: LeCun init + dtype casting)
+        self.qkv_proj = CastedLinear(hidden_size, 3 * self.num_heads * self.head_dim, bias=False)
+        self.o_proj = CastedLinear(self.output_size, hidden_size, bias=False)
 
     def forward(
         self,
