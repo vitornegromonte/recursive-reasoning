@@ -16,7 +16,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from scripts.mi.shared.model_loader import get_device, load_transformer, load_trm
+from scripts.mi.shared.model_loader import get_device, load_transformer, load_trm, load_model
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, save_json, set_paper_style
 
@@ -137,13 +137,14 @@ def run_sweep(
 
 def run_single_trm(
     ckpt_path: str,
-    device,
-    blank_counts: list[int],
-    T_values: list[int],
+    model_type: str = "trm_v2",
+    device=None,
+    blank_counts: list[int] = None,
+    T_values: list[int] = None,
     num_samples: int = 500,
 ) -> dict:
     """Run OOD sweep on a single TRM checkpoint. Returns blanks→T→acc."""
-    model, _ = load_trm(ckpt_path, device)
+    model, _ = load_model(ckpt_path, model_type, device)
     results = run_sweep(model, None, blank_counts, T_values, num_samples, device)
     return results["trm"]
 
@@ -354,6 +355,7 @@ def main() -> None:
     parser.add_argument("--T-values", nargs="+", type=int,
                        default=[1, 2, 4, 8, 16, 32, 42, 64])
     parser.add_argument("--output-dir", default="outputs/mi/exp5")
+    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
     args = parser.parse_args()
 
     has_single = args.trm_ckpt or args.trans_ckpt
@@ -368,7 +370,7 @@ def main() -> None:
         # Single-checkpoint mode (backward compatible)
         trm_model = trans_model = None
         if args.trm_ckpt:
-            trm_model, _ = load_trm(args.trm_ckpt, device)
+            trm_model, _ = load_model(args.trm_ckpt, args.model_type, device)
         if args.trans_ckpt:
             trans_model, _ = load_transformer(args.trans_ckpt, device)
 
@@ -395,7 +397,7 @@ def main() -> None:
                 logger.info("═" * 60)
                 logger.info("TRM checkpoint: %s", run_id)
 
-                r = run_single_trm(ckpt["path"], device, args.blanks,
+                r = run_single_trm(ckpt["path"], args.model_type, device, args.blanks,
                                    args.T_values, args.num_samples)
                 all_trm_results.append(r)
 

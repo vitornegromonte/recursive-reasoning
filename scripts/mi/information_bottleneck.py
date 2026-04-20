@@ -23,6 +23,7 @@ from scripts.mi.shared.model_loader import (
     get_test_dataloader,
     load_transformer,
     load_trm,
+    load_model,
 )
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, save_json, set_paper_style
@@ -223,13 +224,14 @@ def run_transformer_bottleneck(
 
 def run_single_trm(
     ckpt_path: str,
-    device,
+    model_type: str = "trm_v2",
+    device=None,
     num_samples: int = 500,
     T: int = 42,
     k: int = 5,
 ) -> dict:
     """Run bottleneck analysis on a single TRM checkpoint."""
-    model, _ = load_trm(ckpt_path, device)
+    model, _ = load_model(ckpt_path, model_type, device)
     dataloader = get_test_dataloader(num_samples=num_samples, batch_size=64)
     traj = collect_trm_dual_trajectories(
         model, dataloader, device, T=T, max_samples=num_samples,
@@ -242,7 +244,7 @@ def run_single_trm(
     ))
 
     return run_bottleneck_analysis(
-        traj["z_H"].numpy(), traj["inputs"].numpy(),
+        traj["z_H"].float().numpy(), traj["inputs"].numpy(),
         traj["targets"].numpy(), step_indices, k=k,
     )
 
@@ -260,7 +262,7 @@ def run_single_transformer(
         model, dataloader, device, max_samples=num_samples,
     )
     return run_transformer_bottleneck(
-        traj["h_traj"].numpy(), traj["inputs"].numpy(),
+        traj["h_traj"].float().numpy(), traj["inputs"].numpy(),
         traj["targets"].numpy(), k=k,
     )
 
@@ -424,6 +426,7 @@ def main() -> None:
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--k", type=int, default=5, help="k for KSG MI estimator")
     parser.add_argument("--output-dir", default="outputs/mi/exp3")
+    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
     args = parser.parse_args()
 
     has_single = args.trm_ckpt or args.trans_ckpt
@@ -440,7 +443,7 @@ def main() -> None:
         all_results = {}
 
         if args.trm_ckpt:
-            trm_res = run_single_trm(args.trm_ckpt, device, args.num_samples,
+            trm_res = run_single_trm(args.trm_ckpt, args.model_type, device, args.num_samples,
                                      args.T, args.k)
             all_results["trm"] = trm_res
         if args.trans_ckpt:
@@ -464,7 +467,7 @@ def main() -> None:
                 logger.info("═" * 60)
                 logger.info("TRM checkpoint: %s", run_id)
 
-                r = run_single_trm(ckpt["path"], device, args.num_samples,
+                r = run_single_trm(ckpt["path"], args.model_type, device, args.num_samples,
                                    args.T, args.k)
                 all_trm_results.append(r)
                 save_json({"trm": r}, "mi_estimates", str(per_dir))

@@ -17,7 +17,7 @@ import torch
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm
+from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm, load_model
 from scripts.mi.shared.multi_checkpoint import (
     aggregate_nested_results,
     discover_checkpoints,
@@ -59,17 +59,25 @@ def extract_token_mixer_weights(model: torch.nn.Module) -> list[dict[str, np.nda
         gate_up = mixer.gate_up_proj.weight.detach().cpu().numpy()
         down = mixer.down_proj.weight.detach().cpu().numpy()
 
-        # gate_up_proj has shape (2 * intermediate, 81)
+        # gate_up_proj shape: (2 * intermediate, seq_len)
+        # down_proj  shape:   (seq_len, intermediate)
+        # seq_len may be 81 (TRMv2) or 81+puzzle_emb_len (Original TRM).
+        # We only want the 81 Sudoku-cell positions; strip the puzzle prefix.
         intermediate = gate_up.shape[0] // 2
-        W_gate = gate_up[:intermediate]     # (intermediate, 81) — controls gating
-        W_up = gate_up[intermediate:]       # (intermediate, 81) — value path
+        seq_len = gate_up.shape[1]
+        cell_len = 81
+        p = seq_len - cell_len  # prefix positions to skip (0 for TRMv2)
+
+        W_gate = gate_up[:intermediate, p:]    # (intermediate, 81)
+        W_up   = gate_up[intermediate:, p:]   # (intermediate, 81)
+        W_down = down[p:, :]                  # (81, intermediate)
 
         blocks.append({
             "gate_up": gate_up,
             "down": down,
             "W_gate": W_gate,
             "W_up": W_up,
-            "W_down": down,  # (81, intermediate)
+            "W_down": W_down,
             "block_idx": i,
         })
 
@@ -138,7 +146,7 @@ def compute_data_driven_effective_weight(
                 gate_up_out = out
                 intermediate = gate_up_out.shape[-1] // 2
                 gate_vals = F.silu(gate_up_out[..., :intermediate])
-                gate_accum[block_idx].append(gate_vals.mean(dim=0).cpu().numpy())
+                gate_accum[block_idx].append(gate_vals.mean(dim=0).float().cpu().numpy())
         return hook_fn
 
     for i, layer in enumerate(model.trm_net.layers):
@@ -230,7 +238,8 @@ def analyze_correlation(
 
 def run_single(
     ckpt_path: str,
-    device: torch.device,
+    model_type: str = "trm_v2",
+    device: torch.device = None,
     output_dir: str | Path | None = None,
 ) -> dict:
     """Run token-mixer dissection on a single checkpoint.
@@ -241,7 +250,7 @@ def run_single(
     Returns:
         Dict with per-block correlation results for both weight types.
     """
-    model, config = load_trm(ckpt_path, device)
+    model, config = load_model(ckpt_path, model_type, device)
     blocks = extract_token_mixer_weights(model)
     logger.info("Extracted token-mixer weights from %d blocks", len(blocks))
 
@@ -665,6 +674,7 @@ def main() -> None:
     group.add_argument("--trm-ckpt", help="Path to single TRM checkpoint")
     group.add_argument("--trm-ckpt-dir", help="Directory to discover all TRM checkpoints")
     parser.add_argument("--output-dir", default="outputs/mi/exp7", help="Output directory")
+    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
     args = parser.parse_args()
 
     device = get_device()
@@ -672,7 +682,7 @@ def main() -> None:
 
     if args.trm_ckpt:
         # Single-checkpoint mode (backward compatible)
-        run_single(args.trm_ckpt, device, output_dir=args.output_dir)
+        run_single(args.trm_ckpt, args.model_type, device, output_dir=args.output_dir)
     else:
         # Multi-checkpoint mode
         checkpoints = discover_checkpoints(args.trm_ckpt_dir, model_type="trm_v2")
@@ -687,7 +697,7 @@ def main() -> None:
             logger.info("═" * 60)
             logger.info("Running on checkpoint: %s", run_id)
 
-            result = run_single(ckpt["path"], device, output_dir=str(per_ckpt_dir))
+            result = run_single(ckpt["path"], args.model_type, device, output_dir=str(per_ckpt_dir))
             result["run_id"] = run_id
             result["data_size"] = ckpt["data_size"]
             result["seed_idx"] = ckpt["seed_idx"]

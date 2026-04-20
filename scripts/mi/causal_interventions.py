@@ -20,7 +20,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm
+from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm, load_model
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import (
     COLORS,
@@ -226,6 +226,7 @@ def compute_causal_importance(
 
 def run_single(
     ckpt_path: str,
+    model_type: str,
     device: torch.device,
     num_samples: int = 200,
     T: int = 42,
@@ -236,7 +237,7 @@ def run_single(
 
     Returns dict with 'z_H' and 'z_L' causal importance maps.
     """
-    model, config = load_trm(ckpt_path, device)
+    model, config = load_model(ckpt_path, model_type, device)
     dataloader = get_test_dataloader(num_samples=num_samples, batch_size=32)
 
     clean_data = run_clean_and_collect(model, dataloader, device, T, num_samples)
@@ -485,6 +486,7 @@ def main() -> None:
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--num-pairs", type=int, default=100)
     parser.add_argument("--output-dir", default="outputs/mi/exp1")
+    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
     args = parser.parse_args()
 
     device = get_device()
@@ -492,7 +494,7 @@ def main() -> None:
 
     if args.trm_ckpt:
         # Single-checkpoint mode
-        run_single(args.trm_ckpt, device, args.num_samples, args.T,
+        run_single(args.trm_ckpt, args.model_type, device, args.num_samples, args.T,
                    args.num_pairs, args.output_dir)
     else:
         # Multi-checkpoint mode
@@ -509,7 +511,7 @@ def main() -> None:
             logger.info("Running on checkpoint: %s", run_id)
 
             result = run_single(
-                ckpt["path"], device, args.num_samples, args.T,
+                ckpt["path"], args.model_type, device, args.num_samples, args.T,
                 args.num_pairs, str(per_ckpt_dir),
             )
             all_results.append(result)

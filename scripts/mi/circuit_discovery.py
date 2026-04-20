@@ -31,7 +31,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm
+from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm, load_model
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, save_figure, save_json, set_paper_style
 from scripts.mi.shared.sudoku_utils import get_constraint_groups
@@ -138,8 +138,8 @@ def extract_token_mixer_circuit(
 
     for block_idx, layer in enumerate(model.trm_net.layers):
         mixer = layer.token_mixer
-        gate_up_w = mixer.gate_up_proj.weight.detach().cpu().numpy()
-        down_w = mixer.down_proj.weight.detach().cpu().numpy()
+        gate_up_w = mixer.gate_up_proj.weight.detach().float().cpu().numpy()
+        down_w = mixer.down_proj.weight.detach().float().cpu().numpy()
 
         intermediate = gate_up_w.shape[0] // 2
         W_up = gate_up_w[intermediate:]  # (intermediate, 81)
@@ -336,14 +336,16 @@ def _run_with_channel_ablation(
             if layer.mlp_t:
                 h_t = hidden.transpose(1, 2)
                 from src.models.trm_operator import rms_norm
-                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=layer.rms_norm_eps)
+                eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
+                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=eps)
                 hidden = h_t.transpose(1, 2)
 
             # Channel mixing — ablated at target cells
             ch_out = layer.mlp(hidden)
             for tc in target_cells:
                 ch_out[:, tc, :] = 0.0
-            hidden = rms_norm(hidden + ch_out, eps=layer.rms_norm_eps)
+            eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
+            hidden = rms_norm(hidden + ch_out, eps=eps)
         z_L = hidden
 
         # Answer update
@@ -351,12 +353,14 @@ def _run_with_channel_ablation(
         for layer in model.trm_net.layers:
             if layer.mlp_t:
                 h_t = hidden2.transpose(1, 2)
-                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=layer.rms_norm_eps)
+                eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
+                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=eps)
                 hidden2 = h_t.transpose(1, 2)
             ch_out = layer.mlp(hidden2)
             for tc in target_cells:
                 ch_out[:, tc, :] = 0.0
-            hidden2 = rms_norm(hidden2 + ch_out, eps=layer.rms_norm_eps)
+            eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
+            hidden2 = rms_norm(hidden2 + ch_out, eps=eps)
         z_H = hidden2
 
     logits = model.output_head(z_H)
@@ -405,30 +409,37 @@ def channel_mixer_attribution(
         for layer in model.trm_net.layers:
             if layer.mlp_t:
                 h_t = hidden.transpose(1, 2)
-                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=layer.rms_norm_eps)
+                eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
+                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=eps)
                 hidden = h_t.transpose(1, 2)
-            hidden = rms_norm(hidden + layer.mlp(hidden), eps=layer.rms_norm_eps)
+            eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
+            hidden = rms_norm(hidden + layer.mlp(hidden), eps=eps)
         z_L = hidden
 
         hidden2 = z_H + z_L
         for layer in model.trm_net.layers:
             if layer.mlp_t:
                 h_t = hidden2.transpose(1, 2)
-                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=layer.rms_norm_eps)
+                eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
+                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=eps)
                 hidden2 = h_t.transpose(1, 2)
-            hidden2 = rms_norm(hidden2 + layer.mlp(hidden2), eps=layer.rms_norm_eps)
+            eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
+            hidden2 = rms_norm(hidden2 + layer.mlp(hidden2), eps=eps)
         z_H = hidden2
 
     # Now decompose the final z_H at target_cell through the output head
     z_target = z_H[0, target_cell]  # (hidden_size,)
-    output_weight = model.output_head.lm_head.weight  # (num_digits, hidden_size)
+    if hasattr(model, "inner") and hasattr(model.inner, "lm_head"):
+        output_weight = model.inner.lm_head.weight[1:10]  # (9, hidden_size)
+    else:
+        output_weight = model.output_head.lm_head.weight  # (9, hidden_size)
 
     # Logit for correct digit = output_weight[correct_digit] · z_target
     correct_logit = float((output_weight[correct_digit] * z_target).sum().item())
     all_logits = (output_weight * z_target.unsqueeze(0)).sum(dim=-1)  # (num_digits,)
 
     # Per-dimension contribution to the correct digit logit
-    per_dim_contrib = (output_weight[correct_digit] * z_target).detach().cpu().numpy()
+    per_dim_contrib = (output_weight[correct_digit] * z_target).detach().float().cpu().numpy()
 
     # Top contributing dimensions
     top_pos = np.argsort(per_dim_contrib)[-20:][::-1]
@@ -437,7 +448,7 @@ def channel_mixer_attribution(
     return {
         "correct_digit": correct_digit,
         "correct_logit": correct_logit,
-        "all_logits": all_logits.detach().cpu().numpy().tolist(),
+        "all_logits": all_logits.detach().float().cpu().numpy().tolist(),
         "top_positive_dims": top_pos.tolist(),
         "top_positive_contribs": per_dim_contrib[top_pos].tolist(),
         "top_negative_dims": top_neg.tolist(),
@@ -702,7 +713,8 @@ def plot_logit_attribution(
 
 def run_single(
     ckpt_path: str,
-    device: torch.device,
+    model_type: str = "trm_v2",
+    device: torch.device = None,
     num_samples: int = 200,
     T: int = 42,
     max_singles: int = 50,
@@ -713,7 +725,7 @@ def run_single(
 
     Returns dict with aggregate_stats and ablation results.
     """
-    model, config = load_trm(ckpt_path, device)
+    model, config = load_model(ckpt_path, model_type, device)
     dataloader = get_test_dataloader(num_samples=num_samples, batch_size=32)
 
     # Find naked singles
@@ -723,8 +735,8 @@ def run_single(
 
     for x_raw, y_target in dataloader:
         for i in range(x_raw.size(0)):
-            puzzle = x_raw[i].numpy()
-            solution = y_target[i].numpy()
+            puzzle = x_raw[i].numpy() # int
+            solution = y_target[i].numpy() # int
             singles = find_naked_singles(puzzle, solution)
             for ns in singles:
                 ns["puzzle_idx"] = len(all_inputs)
@@ -1097,6 +1109,7 @@ def main() -> None:
     parser.add_argument("--max-singles", type=int, default=50,
                        help="Max naked singles to analyze")
     parser.add_argument("--output-dir", default="outputs/mi/exp8")
+    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
     args = parser.parse_args()
 
     device = get_device()
@@ -1104,7 +1117,7 @@ def main() -> None:
     if args.trm_ckpt:
         # Single-checkpoint mode (backward compatible)
         result = run_single(
-            args.trm_ckpt, device, args.num_samples, args.T,
+            args.trm_ckpt, args.model_type, device, args.num_samples, args.T,
             args.max_singles, args.output_dir,
         )
         logger.info("Done! Results saved to %s", args.output_dir)
@@ -1129,7 +1142,7 @@ def main() -> None:
             logger.info("Running on checkpoint: %s", run_id)
 
             result = run_single(
-                ckpt["path"], device, args.num_samples, args.T,
+                ckpt["path"], args.model_type, device, args.num_samples, args.T,
                 args.max_singles, str(per_dir),
             )
             result["run_id"] = run_id

@@ -288,6 +288,20 @@ def latent_recursion_seq(
 # JAX/Flax-compatible implementation.
 
 
+from dataclasses import dataclass
+
+@dataclass
+class ACTCarry:
+    # Inner model state
+    z_H: torch.Tensor
+    z_L: torch.Tensor
+    # ACT tracking
+    steps: torch.Tensor        # (batch_size, ) int32
+    halted: torch.Tensor       # (batch_size, ) bool
+    # Inputs (saved across steps)
+    current_data: dict[str, torch.Tensor]
+
+
 class SudokuTRMv2(nn.Module):
     """
     TRM model V2 for Sudoku puzzle solving.
@@ -363,6 +377,9 @@ class SudokuTRMv2(nn.Module):
             hidden_size=hidden_size,
             num_digits=num_digits,
         )
+
+        # ACT Q-head (predicts halting utility)
+        self.q_head = nn.Linear(hidden_size, 2)
 
         # Learned initial states: persistent non-trainable buffers (matches original TRM exactly).
         # Stored in bfloat16 so that init_state produces the correct compute dtype under AMP.
@@ -446,3 +463,121 @@ class SudokuTRMv2(nn.Module):
             return logits, trajectory
 
         return logits
+
+    def forward_act_inner(
+        self,
+        x_emb: torch.Tensor,
+        z_H: torch.Tensor,
+        z_L: torch.Tensor,
+        T: int,
+        L_cycles: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Executes exactly one ACT chunk (T steps):
+        - T-1 steps under no_grad
+        - 1 step with grad
+        Returns (new_z_H_detached, new_z_L_detached, logits, (q_halt, q_continue))
+        """
+        # T-1 no_grad steps
+        with torch.no_grad():
+            for _ in range(T - 1):
+                for _ in range(L_cycles):
+                    z_L = self.trm_net(x_emb, z_H, z_L)
+                z_H = self.trm_net(z_H, z_L)
+
+        # 1 grad step
+        for _ in range(L_cycles):
+            z_L = self.trm_net(x_emb, z_H, z_L)
+        z_H = self.trm_net(z_H, z_L)
+
+        new_z_H = z_H.detach()
+        new_z_L = z_L.detach()
+
+        logits = self.output_head(z_H)
+        # Q-head on the first sequence element
+        q_logits = self.q_head(z_H[:, 0]).to(torch.float32)
+        return new_z_H, new_z_L, logits, (q_logits[..., 0], q_logits[..., 1])
+
+
+class SudokuTRM_ACT(nn.Module):
+    """ACT wrapper around SudokuTRMv2."""
+
+    def __init__(self, inner: SudokuTRMv2, halt_max_steps: int = 20, halt_exploration_prob: float = 0.05, no_ACT_continue: bool = False):
+        super().__init__()
+        self.inner = inner
+        self.halt_max_steps = halt_max_steps
+        self.halt_exploration_prob = halt_exploration_prob
+        self.no_ACT_continue = no_ACT_continue
+
+    def initial_carry(self, x: torch.Tensor, y_target: torch.Tensor) -> ACTCarry:
+        batch_size = x.size(0)
+        seq_len = x.size(1)
+        z_H, z_L = self.inner.init_state(batch_size, seq_len, x.device)
+        return ACTCarry(
+            z_H=z_H,
+            z_L=z_L,
+            steps=torch.zeros((batch_size,), dtype=torch.int32, device=x.device),
+            halted=torch.ones((batch_size,), dtype=torch.bool, device=x.device), # Start halted to force reset
+            current_data={"x": x, "labels": y_target, "x_emb": torch.empty(batch_size, seq_len, self.inner.trm_net.hidden_size, device=x.device)}
+        )
+
+    def forward(
+        self,
+        carry: ACTCarry,
+        T: int,
+        L_cycles: int = 1,
+    ) -> tuple[ACTCarry, dict[str, torch.Tensor]]:
+        
+        # Reset completed trajectories mapping
+        batch_size = carry.halted.size(0)
+        z_H, z_L = carry.z_H, carry.z_L
+        
+        if carry.halted.any():
+            # Get fresh init state for halted sequences
+            fresh_z_H, fresh_z_L = self.inner.init_state(batch_size, z_H.size(1), z_H.device)
+            # Mask
+            halt_mask_3d = carry.halted.view(-1, 1, 1).expand_as(z_H)
+            z_H = torch.where(halt_mask_3d, fresh_z_H, z_H)
+            z_L = torch.where(halt_mask_3d, fresh_z_L, z_L)
+
+            # Re-embed input if halted (though input doesn't change here, we just do it once)
+            with torch.no_grad():
+                fresh_x_emb = self.inner.embed(carry.current_data["x"])
+            carry.current_data["x_emb"] = torch.where(halt_mask_3d, fresh_x_emb, carry.current_data["x_emb"])
+
+        new_steps = torch.where(carry.halted, 0, carry.steps)
+        x_emb = carry.current_data["x_emb"]
+
+        # Forward inner
+        new_z_H, new_z_L, logits, (q_halt, q_continue) = self.inner.forward_act_inner(x_emb, z_H, z_L, T, L_cycles)
+        
+        outputs = {
+            "logits": logits,
+            "q_halt_logits": q_halt,
+            "q_continue_logits": q_continue
+        }
+
+        with torch.no_grad():
+            new_steps = new_steps + 1
+            is_last_step = new_steps >= self.halt_max_steps
+            halted = is_last_step
+
+            if self.training and (self.halt_max_steps > 1):
+                if self.no_ACT_continue:
+                    halted = halted | (q_halt > 0)
+                else:
+                    halted = halted | (q_halt > q_continue)
+
+                # Exploration
+                min_halt_steps = (torch.rand_like(q_halt) < self.halt_exploration_prob) * torch.randint_like(new_steps, low=2, high=self.halt_max_steps + 1)
+                halted = halted & (new_steps >= min_halt_steps)
+
+                if not self.no_ACT_continue:
+                    # Target Q Lookahead
+                    _, _, _, (next_q_halt, next_q_continue) = self.inner.forward_act_inner(x_emb, new_z_H, new_z_L, T, L_cycles)
+                    outputs["target_q_continue"] = torch.sigmoid(
+                        torch.where(is_last_step, next_q_halt, torch.maximum(next_q_halt, next_q_continue))
+                    )
+
+        new_carry = ACTCarry(z_H=new_z_H, z_L=new_z_L, steps=new_steps, halted=halted, current_data=carry.current_data)
+        return new_carry, outputs

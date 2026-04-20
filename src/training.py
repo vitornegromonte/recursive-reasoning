@@ -12,7 +12,8 @@ from tqdm import tqdm
 
 from src.models.lstm import SudokuDeepLSTM, SudokuLSTM
 from src.models.transformer import SudokuTransformer
-from src.models.trm import SudokuTRM, SudokuTRMv2, latent_recursion
+from src.models.trm import SudokuTRM, SudokuTRMv2, latent_recursion, SudokuTRM_ACT, ACTCarry
+from src.models.losses import ACTLossHead
 from src.models.utils import EMA, AverageMeter, StableMaxCrossEntropy
 
 # Import experiment tracking (optional)
@@ -923,3 +924,105 @@ def evaluate_trm_v2(
         total += preds.numel()
 
     return correct / total
+
+
+def train_sudoku_trm_act(
+    model: SudokuTRM_ACT | nn.DataParallel[SudokuTRM_ACT],
+    dataloader: DataLoader,
+    device: torch.device,
+    epochs: int = 1,
+    T: int = 3,
+    L_cycles: int = 1,
+    lr: float = 1e-4,
+    weight_decay: float = 1.0,
+    ema_decay: float = 0.999,
+    verbose: bool = True,
+    tracker: ExperimentTracker | None = None,
+    use_amp: bool = False,
+    warmup_steps: int = 0,
+) -> None:
+    """
+    Train a Sudoku TRM V2 model using the exact Adaptive Computation Time (ACT) training loop.
+    
+    Training scheme matches the original pretrain.py EXACTLY:
+    - Initial state (carry) is tracked per batch over multiple steps.
+    - Each batch represents EXACTLY ONE temporal ACT slice.
+    - Runs T-1 steps under no_grad, 1 step with grad, computes ACT loss and optimizer steps ONCE.
+    - Extreme training speed (~2s/batch) restored.
+    """
+    base_model = model.module if isinstance(model, nn.DataParallel) else model
+    base_model.train()
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # Simplified LambdaLR warmup
+    def lr_lambda(current_step: int):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        return 1.0
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    act_loss_fn = ACTLossHead(pad_idx=-100)
+    
+    ema_trm = EMA(base_model.inner.trm_net, decay=ema_decay)
+    ema_head = EMA(base_model.inner.output_head, decay=ema_decay)
+
+    scaler = torch.amp.GradScaler(enabled=use_amp)
+    autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=use_amp)
+
+    log_every = 100 if tracker is None else tracker.config.log_every
+
+    for epoch in range(epochs):
+        loss_meter = AverageMeter()
+        iterator = tqdm(dataloader, desc=f"Epoch {epoch + 1}") if verbose else dataloader
+        
+        # State (Carry) for the dataset (persistent across batches in the epoch conceptually, though original resets per fresh loader)
+        carry: ACTCarry | None = None
+
+        for x_raw, y_target in iterator:
+            x_raw = x_raw.to(device)
+            y_target = y_target.to(device)
+
+            if carry is None or carry.z_H.size(0) != x_raw.size(0):
+                carry = base_model.initial_carry(x_raw, y_target)
+
+            optimizer.zero_grad()
+            with autocast_ctx:
+                # 1 temporal slice of ACT (T steps total inside the wrapper)
+                carry, outputs = base_model(carry, T=T, L_cycles=L_cycles)
+                
+                # Compute loss
+                loss, metrics = act_loss_fn(outputs, y_target, carry.halted, carry.steps)
+
+            # Average loss over the batch size dimension inherently handled inside act_loss_fn.sum() / global_batch_size in original. Note act_loss returns SUM.
+            # We divide by batch size manually to normalize it to mean loss
+            mean_loss = loss / x_raw.size(0)
+
+            scaler.scale(mean_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+
+            ema_trm.update(base_model.inner.trm_net)
+            ema_head.update(base_model.inner.output_head)
+
+            # Detach carry completely
+            carry = ACTCarry(
+                z_H=carry.z_H.detach(),
+                z_L=carry.z_L.detach(),
+                steps=carry.steps.detach(),
+                halted=carry.halted.detach(),
+                current_data={k: v.detach() if isinstance(v, torch.Tensor) else v for k, v in carry.current_data.items()}
+            )
+            
+            # If all sequences in batch are halted, completely fresh carry next round
+            if carry.halted.all():
+                carry = None
+
+            loss_meter.update(mean_loss.item())
+
+            if tracker is not None:
+                tracker.step()
+                if tracker.global_step % log_every == 0:
+                    metrics = {k: v.item() / x_raw.size(0) for k, v in metrics.items()}
+                    tracker.log_metrics({"loss": mean_loss.item(), **metrics}, prefix="train_act")

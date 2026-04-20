@@ -15,7 +15,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm
+from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm, load_model
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, save_json, set_paper_style
 from scripts.mi.shared.trajectory_utils import collect_trm_dual_trajectories
@@ -170,7 +170,8 @@ def cluster_neurons_by_temporal_profile(
 
 def run_single(
     ckpt_path: str,
-    device,
+    model_type: str = "trm_v2",
+    device=None,
     num_samples: int = 500,
     T: int = 42,
 ) -> dict:
@@ -178,7 +179,7 @@ def run_single(
 
     Returns dict with stats, poly_info, and scalar summary metrics.
     """
-    model, _ = load_trm(ckpt_path, device)
+    model, _ = load_model(ckpt_path, model_type, device)
     dataloader = get_test_dataloader(num_samples=num_samples, batch_size=64)
     traj = collect_trm_dual_trajectories(
         model, dataloader, device, T=T, max_samples=num_samples,
@@ -190,7 +191,7 @@ def run_single(
         [T - 1]
     ))
 
-    z_H = traj["z_H"].numpy()
+    z_H = traj["z_H"].float().numpy()
     stats = compute_neuron_stats(z_H, step_indices)
     poly_info = identify_polysemantic_neurons(z_H, step_indices)
 
@@ -330,13 +331,14 @@ def main() -> None:
     parser.add_argument("--num-samples", type=int, default=500)
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--output-dir", default="outputs/mi/exp6")
+    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
     args = parser.parse_args()
 
     device = get_device()
 
     if args.trm_ckpt:
         # Single-checkpoint mode
-        result = run_single(args.trm_ckpt, device, args.num_samples, args.T)
+        result = run_single(args.trm_ckpt, args.model_type, device, args.num_samples, args.T)
         save_json({
             "mean_polysemanticity": result["mean_polysemanticity"],
             "top_neurons": result["top_neurons"],
@@ -360,7 +362,7 @@ def main() -> None:
             logger.info("═" * 60)
             logger.info("Running on checkpoint: %s", run_id)
 
-            result = run_single(ckpt["path"], device, args.num_samples, args.T)
+            result = run_single(ckpt["path"], args.model_type, device, args.num_samples, args.T)
             all_results.append(result)
 
             save_json({

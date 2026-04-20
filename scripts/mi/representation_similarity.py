@@ -20,6 +20,7 @@ from scripts.mi.shared.model_loader import (
     get_test_dataloader,
     load_transformer,
     load_trm,
+    load_model,
 )
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, save_json, set_paper_style
@@ -80,17 +81,18 @@ def select_step_indices(total_steps: int, max_display: int = 20) -> list[int]:
 
 def run_single_trm(
     ckpt_path: str,
-    device,
+    model_type: str = "trm_v2",
+    device=None,
     num_samples: int = 200,
     T: int = 42,
 ) -> dict:
     """Run CKA on a single TRM checkpoint. Returns {cka_matrix, steps}."""
-    model, _ = load_trm(ckpt_path, device)
+    model, _ = load_model(ckpt_path, model_type, device)
     dataloader = get_test_dataloader(num_samples=num_samples, batch_size=32)
     traj = collect_trm_dual_trajectories(
         model, dataloader, device, T=T, max_samples=num_samples
     )
-    z_H = traj["z_H"].numpy()
+    z_H = traj["z_H"].float().numpy()
     trm_steps = select_step_indices(T)
     cka_mat, trm_steps = compute_cka_matrix(z_H, trm_steps)
     return {"cka_matrix": cka_mat, "steps": trm_steps}
@@ -107,7 +109,7 @@ def run_single_transformer(
     traj = collect_transformer_layer_trajectories(
         model, dataloader, device, max_samples=num_samples
     )
-    h = traj["h_traj"].numpy()
+    h = traj["h_traj"].float().numpy()
     trans_steps = list(range(h.shape[1]))
     cka_mat, trans_steps = compute_cka_matrix(h, trans_steps)
     return {"cka_matrix": cka_mat, "steps": trans_steps}
@@ -292,6 +294,7 @@ def main() -> None:
     parser.add_argument("--num-samples", type=int, default=200)
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--output-dir", default="outputs/mi/exp2")
+    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
     args = parser.parse_args()
 
     has_single = args.trm_ckpt or args.trans_ckpt
@@ -309,7 +312,7 @@ def main() -> None:
         trans_cka_mat = trans_steps = None
 
         if args.trm_ckpt:
-            r = run_single_trm(args.trm_ckpt, device, args.num_samples, args.T)
+            r = run_single_trm(args.trm_ckpt, args.model_type, device, args.num_samples, args.T)
             trm_cka_mat, trm_steps = r["cka_matrix"], r["steps"]
             results["trm"] = {"cka_matrix": trm_cka_mat.tolist(), "steps": trm_steps}
 
@@ -334,7 +337,7 @@ def main() -> None:
                 logger.info("═" * 60)
                 logger.info("TRM checkpoint: %s", run_id)
 
-                r = run_single_trm(ckpt["path"], device, args.num_samples, args.T)
+                r = run_single_trm(ckpt["path"], args.model_type, device, args.num_samples, args.T)
                 r["run_id"] = run_id
                 r["data_size"] = ckpt["data_size"]
                 all_trm_results.append(r)

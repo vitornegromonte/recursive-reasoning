@@ -73,6 +73,32 @@ def save_figure(fig: plt.Figure, name: str, output_dir: str | Path) -> Path:
         Path to the saved PNG file.
     """
     out_dir = Path(output_dir)
+    
+    # Auto-label plots based on the output directory (e.g., n1k, n5k, n10k, random)
+    model_label = out_dir.name
+    if model_label in ["n1k", "n5k", "n10k", "random", "global"]:
+        # Append label to filename
+        name = f"{name}_{model_label}"
+        
+        # Append label to figure title
+        label_str = f" [{model_label.upper()}]"
+        assigned = False
+        if getattr(fig, "_suptitle", None) and fig._suptitle.get_text():
+            t = fig._suptitle.get_text()
+            if label_str not in t:
+                fig.suptitle(f"{t}{label_str}")
+            assigned = True
+        else:
+            for ax in fig.axes:
+                t = ax.get_title()
+                if t and label_str not in t:
+                    ax.set_title(f"{t}{label_str}")
+                    assigned = True
+                    
+        # Fallback if no titles existed
+        if not assigned:
+            fig.text(0.5, 0.98, label_str.strip(), ha='center', va='top', fontsize=12, fontweight='bold')
+
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{name}.png"
     fig.savefig(path)

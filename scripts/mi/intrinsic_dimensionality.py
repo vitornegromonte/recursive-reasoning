@@ -20,6 +20,7 @@ from scripts.mi.shared.model_loader import (
     get_test_dataloader,
     load_transformer,
     load_trm,
+    load_model,
 )
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, save_json, set_paper_style
@@ -90,12 +91,13 @@ def compute_id_over_steps(
 
 def run_single_trm(
     ckpt_path: str,
-    device,
+    model_type: str = "trm_v2",
+    device=None,
     num_samples: int = 500,
     T: int = 42,
 ) -> dict:
     """Run dimensionality analysis on a single TRM checkpoint."""
-    model, _ = load_trm(ckpt_path, device)
+    model, _ = load_model(ckpt_path, model_type, device)
     dataloader = get_test_dataloader(num_samples=num_samples, batch_size=64)
     traj = collect_trm_dual_trajectories(
         model, dataloader, device, T=T, max_samples=num_samples,
@@ -105,7 +107,7 @@ def run_single_trm(
         list(range(0, T, max(1, T // 10))) +
         [T - 1]
     ))
-    return compute_id_over_steps(traj["z_H"].numpy(), step_indices)
+    return compute_id_over_steps(traj["z_H"].float().numpy(), step_indices)
 
 
 def run_single_transformer(
@@ -120,7 +122,7 @@ def run_single_transformer(
         model, dataloader, device, max_samples=num_samples,
     )
     return compute_id_over_steps(
-        traj["h_traj"].numpy(), list(range(traj["h_traj"].shape[1]))
+        traj["h_traj"].float().numpy(), list(range(traj["h_traj"].shape[1]))
     )
 
 
@@ -283,6 +285,7 @@ def main() -> None:
     parser.add_argument("--num-samples", type=int, default=500)
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--output-dir", default="outputs/mi/exp4")
+    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
     args = parser.parse_args()
 
     has_single = args.trm_ckpt or args.trans_ckpt
@@ -299,7 +302,7 @@ def main() -> None:
         all_results = {}
 
         if args.trm_ckpt:
-            trm_res = run_single_trm(args.trm_ckpt, device, args.num_samples, args.T)
+            trm_res = run_single_trm(args.trm_ckpt, args.model_type, device, args.num_samples, args.T)
             all_results["trm"] = trm_res
         if args.trans_ckpt:
             trans_res = run_single_transformer(args.trans_ckpt, device, args.num_samples)
@@ -322,7 +325,7 @@ def main() -> None:
                 logger.info("═" * 60)
                 logger.info("TRM checkpoint: %s", run_id)
 
-                r = run_single_trm(ckpt["path"], device, args.num_samples, args.T)
+                r = run_single_trm(ckpt["path"], args.model_type, device, args.num_samples, args.T)
                 all_trm.append(r)
                 save_json({"trm": r}, "intrinsic_dim", str(per_dir))
                 plot_dimensionality(r, None, str(per_dir),
