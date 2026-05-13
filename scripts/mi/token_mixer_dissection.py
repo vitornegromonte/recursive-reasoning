@@ -249,14 +249,20 @@ def analyze_qk_alignment(block: dict) -> dict[str, float]:
 # SwiGLU weight analysis (Sudoku MLP-T TRM — backward compat)
 # ---------------------------------------------------------------------------
 
-def extract_token_mixer_weights(model: torch.nn.Module) -> list[dict]:
-    """Extract SwiGLU token-mixer weight matrices (MLP-T / Sudoku TRM only)."""
+def extract_token_mixer_weights(model: torch.nn.Module, num_cells: int = 81) -> list[dict]:
+    """Extract SwiGLU token-mixer weight matrices (MLP-T / Sudoku TRM only).
+
+    Args:
+        model: The loaded model.
+        num_cells: Number of grid cells (81 for Sudoku). Used to compute the
+            puzzle-embedding prefix offset.
+    """
     blocks = []
     for i, layer in enumerate(model.trm_net.layers):
         if not hasattr(layer, "token_mixer"):
             continue
         if _is_attention_layer(layer):
-            continue   # skip attention blocks here
+            continue
 
         mixer = layer.token_mixer
         if not (hasattr(mixer, "gate_up_proj") and hasattr(mixer, "down_proj")):
@@ -266,9 +272,7 @@ def extract_token_mixer_weights(model: torch.nn.Module) -> list[dict]:
         down    = mixer.down_proj.weight.detach().cpu().numpy()
         intermediate = gate_up.shape[0] // 2
         seq_len = gate_up.shape[1]
-        # cell_len = seq_len minus puzzle-embedding prefix (if any)
-        cell_len = down.shape[0]  # down_proj maps back to seq_len
-        p = seq_len - cell_len
+        p = seq_len - num_cells  # puzzle-embedding prefix offset
 
         blocks.append({
             "gate_up":   gate_up,
@@ -409,8 +413,9 @@ def _run_attention(model, config, device, output_dir, arc_dataset_dir,
 
 
 def _run_swiglu(model, config, device, output_dir, num_samples) -> dict:
-    blocks = extract_token_mixer_weights(model)
-    logger.info("Extracted SwiGLU blocks from %d blocks", len(blocks))
+    num_cells = config.get("num_cells", 81)
+    blocks = extract_token_mixer_weights(model, num_cells)
+    logger.info("Extracted SwiGLU blocks from %d blocks (num_cells=%d)", len(blocks), num_cells)
 
     adj = get_constraint_adjacency(9)
     type_adjs = get_constraint_type_adjacency(9)
