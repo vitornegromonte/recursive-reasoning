@@ -60,7 +60,6 @@ run_experiments() {
     local domain="${5:-sudoku}"
 
     local EXPERIMENTS=(
-        "causal_interventions.py|exp1"
         "exp2_dynamics.py|exp2"
         "token_mixer_dissection.py|exp7"
         "information_bottleneck.py|exp3"

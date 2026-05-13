@@ -129,8 +129,8 @@ def _collect_perturbed_trajectory(
         seq_len = x_emb.size(1)
         z_H, z_L = model.init_state(batch, seq_len, device)
 
-        z_H = z_H + torch.randn_like(z_H, generator=rng) * eps
-        z_L = z_L + torch.randn_like(z_L, generator=rng) * eps
+        z_H = z_H + torch.randn(z_H.shape, generator=rng, device=z_H.device, dtype=z_H.dtype) * eps
+        z_L = z_L + torch.randn(z_L.shape, generator=rng, device=z_L.device, dtype=z_L.dtype) * eps
 
         batch_z_H = []
         for _ in range(T):
@@ -142,7 +142,7 @@ def _collect_perturbed_trajectory(
         collected += batch
 
     z_H_pert = torch.cat(all_z_H, dim=0)[:max_samples]
-    return z_H_pert.numpy()
+    return z_H_pert.float().numpy()
 
 
 def compute_lyapunov_exponents(
@@ -296,11 +296,16 @@ def compute_b0_persistence(
 
         rips = gd.RipsComplex(points=points, max_edge_length=max_edge_length)
         simplex_tree = rips.create_simplex_tree(max_dimension=1)
-        diag = simplex_tree.persistence(min_persistence=0.0)
+        simplex_tree.compute_persistence()
 
-        bars_0 = [d for d in diag if d[0] == 0]
-        pers_bars = [d[1] for _, d in bars_0 if d[1][1] != float("inf")]
-        b0_vals.append(float(len(pers_bars)))
+        # Count 0-dimensional bars that persist beyond a small epsilon
+        eps = 1e-6
+        b0 = 0
+        for interval in simplex_tree.persistence_intervals_in_dimension(0):
+            death = interval[1]
+            if death == float("inf") or death > eps:
+                b0 += 1
+        b0_vals.append(float(b0))
 
     # Interpolate to full step range
     b0_trajectory = np.interp(
