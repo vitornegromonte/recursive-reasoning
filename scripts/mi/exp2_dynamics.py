@@ -236,11 +236,12 @@ def compute_rqa(
 
     RR = float(R.sum() / (T * T))
 
-    def _diagonal_lengths(mat: np.ndarray) -> list[int]:
-        """Return histogram of consecutive-1 lengths along true diagonals (j-i=const)."""
+    def _diagonal_lengths(mat: np.ndarray, include_main: bool = False) -> list[int]:
+        """Run lengths along true diagonals (constant j-i). Excludes LoI by default."""
+        offsets = range(-T + 1, T) if include_main else [o for o in range(-T + 1, T) if o != 0]
         lengths = []
-        for offset in range(-T + 1, T):
-            diag = np.diag(mat, offset)
+        for offset in offsets:
+            diag = mat.diagonal(offset)
             run = 0
             for v in diag:
                 if v > 0.5:
@@ -254,7 +255,6 @@ def compute_rqa(
         return lengths
 
     def _vertical_lengths(mat: np.ndarray) -> list[int]:
-        """Return histogram of consecutive-1 lengths along columns."""
         lengths = []
         for j in range(T):
             run = 0
