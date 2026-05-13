@@ -439,19 +439,14 @@ def load_original_trm(
     # Default architecture config (matches run_sudoku.sh and trm.yaml)
     arch_config = SUDOKU_ARCH_CONFIG.copy()
 
-    # Instantiate the full model (ACT wrapper included for state_dict compat)
-    model = TinyRecursiveReasoningModel_ACTV1(arch_config)
-
-    # Load checkpoint — strip ACTLossHead 'model.' prefix if present
+    # Load checkpoint first to determine num_cells
     raw_sd = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if isinstance(raw_sd, dict) and "model_state_dict" in raw_sd:
         raw_sd = raw_sd["model_state_dict"]
 
     clean_sd: dict[str, Any] = {}
     for k, v in raw_sd.items():
-        # Strip compile prefix
         k = k.replace("_orig_mod.", "")
-        # Strip ACTLossHead wrapper prefix
         if k.startswith("model."):
             k = k[len("model."):]
         clean_sd[k] = v
@@ -463,6 +458,8 @@ def load_original_trm(
     arch_config["num_digits"] = 9
     arch_config["cell_dim"] = 10
 
+    # Instantiate the full model (ACT wrapper included for state_dict compat)
+    model = TinyRecursiveReasoningModel_ACTV1(arch_config)
     model.load_state_dict(clean_sd, strict=False)
 
     # Wrap inner model in adapter
@@ -516,14 +513,6 @@ def load_arc_trm(
     if isinstance(raw_sd, dict) and "model_state_dict" in raw_sd:
         raw_sd = raw_sd["model_state_dict"]
 
-    # Extract dynamic num_puzzle_identifiers
-    for k, v in raw_sd.items():
-        if k.endswith("inner.puzzle_emb.weights"):
-            arch_config["num_puzzle_identifiers"] = v.shape[0]
-            break
-
-    model = TinyRecursiveReasoningModel_ACTV1(arch_config)
-
     clean_sd: dict[str, Any] = {}
     for k, v in raw_sd.items():
         k = k.replace("_orig_mod.", "")
@@ -531,11 +520,18 @@ def load_arc_trm(
             k = k[len("model."):]
         clean_sd[k] = v
 
+    # Extract dynamic num_puzzle_identifiers
+    for k, v in raw_sd.items():
+        if k.endswith("inner.puzzle_emb.weights"):
+            arch_config["num_puzzle_identifiers"] = v.shape[0]
+            break
+
     # Extract num_cells from state dict
     num_cells = _extract_num_cells_from_state_dict(clean_sd, default=900)
     arch_config["num_cells"] = num_cells
     arch_config["seq_len"] = num_cells
 
+    model = TinyRecursiveReasoningModel_ACTV1(arch_config)
     model.load_state_dict(clean_sd, strict=False)
 
     puzzle_emb_len = arch_config["puzzle_emb_len"]
