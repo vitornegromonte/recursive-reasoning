@@ -1,13 +1,20 @@
-# There and Back Again: Recursive Computation in Neural Algorithmic Reasonig
+# Mechanistic Interpretability of Tiny Recursive Models (TRM)
 
-Benchmark for comparing Tiny Recursive Models (TRM), Transformers, and LSTMs on combinatorial neural algorithmic reasoning tasks (Sudoku).
+This repository contains the **mechanistic interpretability (MI) pipeline** for analyzing [Tiny Recursive Models (TRM)](https://arxiv.org/abs/2510.04871) — a 7M parameter recursive reasoning architecture that achieves 45% on ARC-AGI-1.
 
-## Installation
+Training code is **not** part of this repository. We use the original [TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) codebase for pretraining, with custom bash scripts (`run.sh` for Sudoku, `run_arc.sh` for ARC) that adapt the training setup to a single GPU.
+
+---
+
+## Setup
 
 ```bash
-# Clone the repository
+# Clone this repository
 git clone https://github.com/vitornegromonte/recursive-reasoning.git
 cd recursive-reasoning
+
+# Clone the original TRM repository (training code)
+git clone https://github.com/SamsungSAILMontreal/TinyRecursiveModels.git
 
 # Install with uv (recommended)
 uv sync
@@ -16,214 +23,108 @@ uv sync
 pip install -e .
 ```
 
-### Optional Dependencies
+---
+
+## Training TRM Checkpoints
+
+All training is done via the `TinyRecursiveModels/` subrepository. We provide two launchers that sweep over dataset sizes (1k, 5k, 10k) and seeds (0, 1, 2):
 
 ```bash
-# For experiment tracking (Weights & Biases)
-uv sync --extra tracking
+cd TinyRecursiveModels
 
-# For hyperparameter optimization (Optuna)
-uv sync --extra hpopt
+# Sudoku-Extreme (symbolic reasoning, no augmentation)
+bash run_sudoku.sh
 
-# For all extras
-uv sync --all-extras
+# ConceptARC (visual reasoning, scaled augmentation)
+bash run_arc.sh
 ```
 
-## Quick Start
+Checkpoints are saved periodically (every ~10% of training) in:
+```
+TinyRecursiveModels/checkpoints/
+├── TRM-Sudoku-1000/trm-sudoku-n1000-seed0-e19000/
+│   ├── step_1900
+│   ├── step_3800
+│   └── metrics.jsonl
+├── TRM-ARC-1000/trm-arc-n1000-seed0-e13000/
+│   ├── step_1000
+│   └── metrics.jsonl
+└── ...
+```
+
+---
+
+## Mechanistic Interpretability Pipeline
+
+The MI pipeline is in `scripts/mi/`. It runs 8 experiments across all checkpoints.
+
+### Running the full pipeline
 
 ```bash
-# Train TRM model
-uv run python main.py --model trm --epochs 20
-
-# Train Transformer baseline
-uv run python main.py --model transformer --epochs 20
-
-# Train LSTM baseline
-uv run python main.py --model lstm --epochs 20
-
-# Train all models
-uv run python main.py --model all
+python scripts/mi/run_all_checkpoints.py \
+    --checkpoints-dir TinyRecursiveModels/checkpoints \
+    --output-dir outputs/mi
 ```
 
-## CLI Options
+### Aggregating results across seeds
 
 ```bash
-uv run python main.py --help
+python scripts/mi/aggregate_seeds.py \
+    --results-dir outputs/mi \
+    --output-dir outputs/mi/aggregated
 ```
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--model` | trm | Model type: trm, transformer, lstm, all |
-| `--epochs` | 20 | Number of training epochs |
-| `--batch-size` | 64 | Batch size |
-| `--dim` | 128 | Model dimension |
-| `--puzzle-size` | 4 | Sudoku size: 4, 9, or 16 |
-| `--lr` | 1e-4 | Learning rate |
-| `--seed` | None | Random seed for reproducibility |
-| `--log-recursion` | - | Enable recursion-step probing (TRM only) |
-| `--log-latent-stats` | - | Enable latent state statistics (TRM only) |
-| `--log-dir` | logs/ | Directory for experiment logs |
-| `--wandb` | - | Enable Weights & Biases logging |
-| `--num-workers` | 0 | DataLoader workers (0=auto) |
+### MI Experiments
 
-## Experiment Logging
+| Script | Experiment |
+|---|---|
+| `representation_similarity.py` | CKA / RSA across recursive steps |
+| `token_mixer_dissection.py` | Weight-level analysis of token-mixer heads |
+| `circuit_discovery.py` | Activation patching & circuit localization |
+| `causal_interventions.py` | Causal tracing and intervention analysis |
+| `information_bottleneck.py` | Information compression across recursion |
+| `intrinsic_dimensionality.py` | Intrinsic dimensionality of latent states |
+| `superposition_analysis.py` | Superposition and polysemanticity |
+| `ood_blanks_sweep.py` | OOD generalization under blank token sweeps |
 
-The project includes a robust experiment logging system designed for reproducibility and mechanistic analysis.
-
-### Enable Logging
-
-```bash
-# Run TRM with full logging (recommended for research)
-uv run python main.py --model trm --seed 42 --log-recursion --log-latent-stats
-
-# Multiple seeds for statistical analysis
-for seed in 1 2 3 4 5; do
-    uv run python main.py --model trm --seed $seed --log-recursion --log-latent-stats
-done
-```
-
-### Log Directory Structure
-
-Each experiment creates a unique folder under `logs/`:
-
-```
-logs/
-├── trm_n10000_s42_a1b2c3/          # Experiment ID = model_n{samples}_s{seed}_{hash}
-│   ├── config.json                  # Full experiment metadata
-│   ├── metrics.csv                  # Per-epoch training metrics
-│   ├── recursion_metrics.csv        # Recursion-step probing (if --log-recursion)
-│   └── latent_stats.csv             # Latent state statistics (if --log-latent-stats)
-├── trm_n10000_s43_d4e5f6/
-│   └── ...
-```
-
-### Log File Contents
-
-**config.json** - Experiment metadata for reproducibility:
-- Git commit hash and dirty state
-- Timestamp, hostname, platform
-- Python/PyTorch/CUDA versions
-- Model architecture (type, dim, params, layers)
-- Training hyperparameters (lr, batch size, epochs)
-- Dataset configuration
-- Seed for reproducibility
-
-**metrics.csv** - Per-epoch training dynamics:
-```csv
-epoch,train_loss,val_loss,train_accuracy,val_accuracy,gradient_norm,parameter_norm,learning_rate,epoch_time_seconds
-1,1.38,1.42,0.24,0.23,2.87,43.4,0.0001,8.12
-2,1.21,1.35,0.31,0.28,2.34,43.4,0.0001,3.22
-```
-
-**recursion_metrics.csv** - Accuracy/loss at each recursion step (TRM only):
-```csv
-epoch,recursion_step,loss,accuracy
-1,1,1.61,0.25
-1,2,1.58,0.26
-1,3,1.55,0.28
-...
-```
-
-**latent_stats.csv** - Latent state statistics for mechanistic analysis:
-```csv
-epoch,recursion_step,y_l2_norm,y_cosine_prev,y_batch_variance,z_l2_norm,z_cosine_prev,z_batch_variance
-1,1,14.47,0.0,0.87,14.10,0.0,0.65
-1,2,15.49,0.20,0.93,14.77,0.24,0.91
-```
-
-### Aggregating Results
-
-Use the `aggregate_results()` utility for post-hoc analysis across multiple experiments:
-
-```python
-from src.logging_utils import aggregate_results, load_experiment
-
-# Load a single experiment
-exp = load_experiment("logs/trm_n10000_s42_a1b2c3")
-print(exp["config"])  # Metadata dict
-print(exp["metrics"])  # pandas DataFrame
-
-# Aggregate across all experiments
-df = aggregate_results("logs/", groupby=["model_type", "dataset_size"])
-print(df.groupby("model_type")["final_val_accuracy"].mean())
-```
-
-> **Note**: `load_experiment()` and `aggregate_results()` require `pandas` (`uv sync --extra data`).
-
-## Dataset
-
-This project uses the **Sudoku-Extreme** dataset from HuggingFace ([sapientinc/sudoku-extreme](https://huggingface.co/datasets/sapientinc/sudoku-extreme)):
-
-- **3.8M training puzzles** with varying difficulty
-- **423K test puzzles** (mathematically inequivalent to training)
-- Mix of easy and extremely hard puzzles from the Sudoku community
-- All 9×9 puzzles with guaranteed unique solutions
-
-```bash
-# Install dataset dependencies
-uv sync --extra data
-```
-
-```python
-from src.data import SudokuExtremeTask, SudokuTaskConfig
-
-# Load with difficulty filtering
-config = SudokuTaskConfig(
-    train_samples=100_000,  # Limit samples (None = all 3.8M)
-    min_rating=100,         # Filter by difficulty
-)
-task = SudokuExtremeTask(config)
-train_ds = task.get_train_dataset()
-```
-
-For quick experiments (4×4 or 16×16 puzzles), use procedural generation:
-
-```python
-from src.data import SudokuProceduralTask
-
-task = SudokuProceduralTask(grid_size=4)  # 4×4, 9×9, or 16×16
-```
-
-## Running Experiments
-
-```bash
-# Quick test
-./scripts/run_experiments.sh quick
-
-# Full comparison
-./scripts/run_experiments.sh comparison
-
-# Ablation studies
-./scripts/run_experiments.sh ablation
-
-# Hyperparameter optimization
-./scripts/run_experiments.sh hpo-trm
-```
+---
 
 ## Project Structure
 
 ```
 recursive-reasoning/
-├── main.py                 # CLI entry point
-├── src/
-│   ├── data/
-│   │   ├── tasks/          # Task-based API (extensible)
-│   │   │   ├── base.py     # ReasoningTask interface
-│   │   │   └── sudoku.py   # Sudoku-Extreme & procedural
-│   │   └── sudoku.py       # Legacy procedural generation
-│   ├── models/
-│   │   ├── trm.py          # Tiny Recursive Model
-│   │   ├── mlp.py          # MLP-Mixer operator
-│   │   ├── transformer.py  # Transformer baseline
-│   │   └── lstm.py         # LSTM baseline
-│   ├── training.py         # Training loops
-│   ├── experiment.py       # Logging & checkpoints
-│   ├── distributed.py      # Multi-GPU support
-│   └── hpo.py              # Hyperparameter optimization
 ├── scripts/
-│   ├── run_experiments.sh  # Experiment runner
-│   └── run_hpo.py          # HPO script
-└── configs/                # Configuration files
+│   └── mi/                          # Mechanistic interpretability pipeline
+│       ├── run_all_checkpoints.py   # Orchestrator: runs all experiments
+│       ├── aggregate_seeds.py       # Aggregation across seeds + bootstrap CI
+│       ├── representation_similarity.py
+│       ├── token_mixer_dissection.py
+│       ├── circuit_discovery.py
+│       ├── causal_interventions.py
+│       ├── information_bottleneck.py
+│       ├── intrinsic_dimensionality.py
+│       ├── superposition_analysis.py
+│       ├── ood_blanks_sweep.py
+│       └── shared/                  # Shared utilities (model loading, hooks, etc.)
+└── TinyRecursiveModels/             # Training code (cloned from original repo)
+    ├── run.sh                       # Sudoku sweep launcher
+    ├── run_arc.sh                   # ARC sweep launcher
+    └── ...
+```
+
+---
+
+## Reference
+
+```bibtex
+@misc{jolicoeurmartineau2025morerecursivereasoningtiny,
+    title={Less is More: Recursive Reasoning with Tiny Networks},
+    author={Alexia Jolicoeur-Martineau},
+    year={2025},
+    eprint={2510.04871},
+    archivePrefix={arXiv},
+    url={https://arxiv.org/abs/2510.04871},
+}
 ```
 
 ## License

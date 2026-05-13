@@ -31,7 +31,14 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm, load_model
+from scripts.mi.shared.model_loader import (
+    get_arc_dataloader,
+    get_device,
+    get_test_dataloader,
+    load_trm,
+    load_model,
+    resolve_matched_checkpoint,
+)
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, save_figure, save_json, set_paper_style
 from scripts.mi.shared.sudoku_utils import get_constraint_groups
@@ -189,13 +196,24 @@ def ablation_study(
     T: int = 42,
 ) -> dict:
     """
-    Run component-level ablation on the TRM circuit.
+    Run component-level ablation on the TRM circuit via forward hooks.
 
-    Ablations:
-    1. Zero out token-mixer weights for all constraint peers -> target cell
-    2. Zero out full token-mixer for target cell (all incoming)
-    3. Zero out channel-mixer for target cell
-    4. Combined: token + channel mixer
+    All four conditions call the unmodified model() forward pass with
+    register_forward_hook callbacks that zero the relevant module output
+    at the target cell positions. This guarantees a consistent causal
+    graph across all conditions and enforces ablation monotonicity:
+
+        both_drop >= max(token_drop, channel_drop)
+
+    The old weight-mutation + manual-loop approach violated this
+    invariant because the two mechanisms used incompatible intervention
+    levels (weight-space vs activation-space).
+
+    Shape conventions (verified empirically):
+        token_mixer: receives (B, D, seq) -> returns (B, D, seq)
+            target cells zeroed on dim 2: out[:, :, target_cells] = 0
+        mlp:         receives (B, seq, D) -> returns (B, seq, D)
+            target cells zeroed on dim 1: out[:, target_cells, :] = 0
 
     Args:
         model: TRM model.
@@ -206,167 +224,71 @@ def ablation_study(
         T: Recursion steps.
 
     Returns:
-        Dict with per-ablation accuracy results.
+        Dict with per-ablation accuracy results. Keys:
+            clean_acc_on_targets, ablate_token_mixer, ablate_channel_mixer,
+            ablate_both, token_mixer_drop, channel_mixer_drop, both_drop.
     """
-    x_raw = x_raw.to(device)
+    x_raw   = x_raw.to(device)
     targets = targets.to(device)
+    target_list = sorted(set(target_cells))
 
-    # Clean run
-    clean_logits = model(x_raw, T=T)
-    clean_preds = clean_logits.argmax(dim=-1)
-
-    target_set = set(target_cells)
-    clean_acc = float((clean_preds[:, list(target_set)] == targets[:, list(target_set)]).float().mean().item())
-
-    results = {"clean_acc_on_targets": clean_acc}
-
-    # Save original weights
-    original_weights = {}
-    for i, layer in enumerate(model.trm_net.layers):
-        original_weights[f"token_gate_up_{i}"] = layer.token_mixer.gate_up_proj.weight.data.clone()
-        original_weights[f"token_down_{i}"] = layer.token_mixer.down_proj.weight.data.clone()
-        original_weights[f"channel_gate_up_{i}"] = layer.mlp.gate_up_proj.weight.data.clone()
-        original_weights[f"channel_down_{i}"] = layer.mlp.down_proj.weight.data.clone()
-
-    # Zero token-mixer incoming weights to target cells
-    for layer in model.trm_net.layers:
-        w = layer.token_mixer.down_proj.weight.data  # (81, intermediate)
-        for tc in target_cells:
-            w[tc, :] = 0.0
-
-    ablated_logits = model(x_raw, T=T)
-    ablated_preds = ablated_logits.argmax(dim=-1)
-    abl1_acc = float((ablated_preds[:, list(target_set)] == targets[:, list(target_set)]).float().mean().item())
-    results["ablate_token_mixer_incoming"] = abl1_acc
-    results["token_mixer_incoming_drop"] = clean_acc - abl1_acc
-
-    # Restore
-    for i, layer in enumerate(model.trm_net.layers):
-        layer.token_mixer.down_proj.weight.data.copy_(original_weights[f"token_down_{i}"])
-
-    # Zero token-mixer outgoing weights from target cells 
-    for layer in model.trm_net.layers:
-        intermediate = layer.token_mixer.gate_up_proj.weight.shape[0] // 2
-        # gate part
-        layer.token_mixer.gate_up_proj.weight.data[:intermediate, list(target_cells)] = 0.0
-        # up part
-        layer.token_mixer.gate_up_proj.weight.data[intermediate:, list(target_cells)] = 0.0
-
-    ablated_logits = model(x_raw, T=T)
-    ablated_preds = ablated_logits.argmax(dim=-1)
-    abl2_acc = float((ablated_preds[:, list(target_set)] == targets[:, list(target_set)]).float().mean().item())
-    results["ablate_token_mixer_outgoing"] = abl2_acc
-    results["token_mixer_outgoing_drop"] = clean_acc - abl2_acc
-
-    # Restore
-    for i, layer in enumerate(model.trm_net.layers):
-        layer.token_mixer.gate_up_proj.weight.data.copy_(original_weights[f"token_gate_up_{i}"])
-
-    # Zero channel-mixer for target cells
-    for layer in model.trm_net.layers:
-        # Zero the channel mixer output for target cells by hooking the down_proj
-        # Since channel mixer operates per-cell on (B, 81, D), we zero the output
-        # for target cells by zeroing the relevant rows of gate_up
-        # Actually, easier: just zero the bias-free output via a forward hook
-        pass
-
-    # alt: manually run with channel mixer zeroed at target cells
-    abl3_acc = _run_with_channel_ablation(
-        model, x_raw, targets, target_cells, T, device, original_weights
-    )
-    results["ablate_channel_mixer"] = abl3_acc
-    results["channel_mixer_drop"] = clean_acc - abl3_acc
-
-    # Zero both token and channel mixers
-    for layer in model.trm_net.layers:
-        w = layer.token_mixer.down_proj.weight.data
-        for tc in target_cells:
-            w[tc, :] = 0.0
-
-    abl4_acc = _run_with_channel_ablation(
-        model, x_raw, targets, target_cells, T, device, original_weights,
-        restore_token=False,
-    )
-    results["ablate_both"] = abl4_acc
-    results["both_drop"] = clean_acc - abl4_acc
-
-    # Final restore
-    for i, layer in enumerate(model.trm_net.layers):
-        layer.token_mixer.gate_up_proj.weight.data.copy_(original_weights[f"token_gate_up_{i}"])
-        layer.token_mixer.down_proj.weight.data.copy_(original_weights[f"token_down_{i}"])
-        layer.mlp.gate_up_proj.weight.data.copy_(original_weights[f"channel_gate_up_{i}"])
-        layer.mlp.down_proj.weight.data.copy_(original_weights[f"channel_down_{i}"])
-
-    return results
-
-
-@torch.no_grad()
-def _run_with_channel_ablation(
-    model: torch.nn.Module,
-    x_raw: torch.Tensor,
-    targets: torch.Tensor,
-    target_cells: list[int],
-    T: int,
-    device: torch.device,
-    original_weights: dict,
-    restore_token: bool = True,
-) -> float:
-    """
-    Run forward pass with channel mixer zeroed for target cells.
-
-    We manually execute the TRM forward loop, intercepting each block's
-    channel mixer output to zero it at target cell positions.
-    """
-    # Restore token mixer if needed
-    if restore_token:
-        for i, layer in enumerate(model.trm_net.layers):
-            layer.token_mixer.down_proj.weight.data.copy_(original_weights[f"token_down_{i}"])
-
-    x_emb = model.embed(x_raw)
-    batch = x_raw.size(0)
-    z_H, z_L = model.init_state(batch, x_emb.size(1), device)
-
-    target_set = set(target_cells)
-
-    for _t in range(T):
-        # Latent update
-        hidden = x_emb + z_H + z_L
+    def _run(token_ablate: bool, channel_ablate: bool) -> float:
+        """Single forward pass with the requested ablation hooks active."""
+        hooks: list = []
         for layer in model.trm_net.layers:
-            # Token mixing
-            if layer.mlp_t:
-                h_t = hidden.transpose(1, 2)
-                from src.models.trm_operator import rms_norm
-                eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
-                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=eps)
-                hidden = h_t.transpose(1, 2)
+            if token_ablate:
+                # Token mixer: (B, D, seq) -> zero seq-dim at target positions
+                def _tok_hook(mod, inp, out, tc=target_list):
+                    out = out.clone()
+                    out[:, :, tc] = 0.0
+                    return out
+                hooks.append(layer.token_mixer.register_forward_hook(_tok_hook))
 
-            # Channel mixing — ablated at target cells
-            ch_out = layer.mlp(hidden)
-            for tc in target_cells:
-                ch_out[:, tc, :] = 0.0
-            eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
-            hidden = rms_norm(hidden + ch_out, eps=eps)
-        z_L = hidden
+            if channel_ablate:
+                # Channel MLP: (B, seq, D) -> zero seq-dim at target positions
+                def _ch_hook(mod, inp, out, tc=target_list):
+                    out = out.clone()
+                    out[:, tc, :] = 0.0
+                    return out
+                hooks.append(layer.mlp.register_forward_hook(_ch_hook))
 
-        # Answer update
-        hidden2 = z_H + z_L
-        for layer in model.trm_net.layers:
-            if layer.mlp_t:
-                h_t = hidden2.transpose(1, 2)
-                eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
-                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=eps)
-                hidden2 = h_t.transpose(1, 2)
-            ch_out = layer.mlp(hidden2)
-            for tc in target_cells:
-                ch_out[:, tc, :] = 0.0
-            eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
-            hidden2 = rms_norm(hidden2 + ch_out, eps=eps)
-        z_H = hidden2
+        try:
+            logits = model(x_raw, T=T)
+            preds  = logits.argmax(dim=-1)
+            return float(
+                (preds[:, target_list] == targets[:, target_list]).float().mean().item()
+            )
+        finally:
+            for h in hooks:
+                h.remove()
 
-    logits = model.output_head(z_H)
-    preds = logits.argmax(dim=-1)
-    target_list = list(target_set)
-    return float((preds[:, target_list] == targets[:, target_list]).float().mean().item())
+    clean_acc   = _run(token_ablate=False, channel_ablate=False)
+    token_acc   = _run(token_ablate=True,  channel_ablate=False)
+    channel_acc = _run(token_ablate=False, channel_ablate=True)
+    both_acc    = _run(token_ablate=True,  channel_ablate=True)
+
+    token_drop   = clean_acc - token_acc
+    channel_drop = clean_acc - channel_acc
+    both_drop    = clean_acc - both_acc
+
+    # Monotonicity sanity check (log only; do not crash)
+    if both_drop < token_drop - 1e-6 or both_drop < channel_drop - 1e-6:
+        logger.warning(
+            "Ablation monotonicity violated: both_drop=%.4f < "
+            "token_drop=%.4f or channel_drop=%.4f. "
+            "Verify that token_mixer and mlp hook shapes are correct.",
+            both_drop, token_drop, channel_drop,
+        )
+
+    return {
+        "clean_acc_on_targets": clean_acc,
+        "ablate_token_mixer":   token_acc,
+        "ablate_channel_mixer": channel_acc,
+        "ablate_both":          both_acc,
+        "token_mixer_drop":     round(token_drop,   6),
+        "channel_mixer_drop":   round(channel_drop, 6),
+        "both_drop":            round(both_drop,    6),
+    }
 
 
 # Channel-Mixer Logit Attribution
@@ -457,6 +379,305 @@ def channel_mixer_attribution(
         "total_negative": float(per_dim_contrib[per_dim_contrib < 0].sum()),
     }
 
+# ---------------------------------------------------------------------------
+# ARC Circuit Analysis (attention TRM)
+# ---------------------------------------------------------------------------
+
+def find_arc_motifs(
+    inp: np.ndarray,
+    label: np.ndarray,
+    grid_h: int = 30,
+    grid_w: int = 30,
+    puzzle_emb_len: int = 16,
+) -> list[dict]:
+    """Find ARC 'color-copy' motifs: output cells whose value matches a
+    spatially offset input cell (identity / translation tasks).
+
+    Args:
+        inp:   (900,) input token indices (1-indexed, 0=PAD).
+        label: (900,) label token indices.
+        grid_h, grid_w: ARC grid dimensions.
+
+    Returns:
+        List of dicts with keys: cell_idx, source_idx, color, delta_r, delta_c.
+    """
+    motifs = []
+    seen_deltas: dict[tuple[int,int], int] = {}
+
+    for idx in range(grid_h * grid_w):
+        r, c = divmod(idx, grid_w)
+        tgt_color = int(label[idx])
+        if tgt_color == 0:  # PAD / background
+            continue
+
+        for dr in range(-3, 4):
+            for dc in range(-3, 4):
+                if dr == 0 and dc == 0:
+                    continue
+                src_r, src_c = r + dr, c + dc
+                if not (0 <= src_r < grid_h and 0 <= src_c < grid_w):
+                    continue
+                src_idx = src_r * grid_w + src_c
+                if int(inp[src_idx]) == tgt_color:
+                    delta = (dr, dc)
+                    seen_deltas[delta] = seen_deltas.get(delta, 0) + 1
+                    motifs.append({
+                        "cell_idx": idx,
+                        "source_idx": src_idx,
+                        "color": tgt_color,
+                        "delta_r": dr,
+                        "delta_c": dc,
+                    })
+                    break  # one match per output cell is enough
+
+    # Only keep motifs whose delta is the most common one (dominant transform)
+    if not motifs:
+        return []
+    dominant = max(seen_deltas, key=seen_deltas.get)
+    return [m for m in motifs if (m["delta_r"], m["delta_c"]) == dominant]
+
+
+@torch.no_grad()
+def extract_attention_circuit(
+    model: torch.nn.Module,
+    target_cell: int,
+    source_cell: int,
+    puzzle_emb_len: int = 16,
+) -> list[dict]:
+    """Compute the attention-routing score from source_cell to target_cell.
+
+    For each L-level block and each head, computes:
+        score_h = W_O_h @ W_V_h^T  projected onto the target->source path.
+
+    Returns:
+        List of dicts per block: head_scores, mean_score.
+    """
+    blocks_info = []
+    tgt = target_cell + puzzle_emb_len
+    src = source_cell + puzzle_emb_len
+
+    for block_idx, layer in enumerate(model.trm_net.layers):
+        attn = getattr(layer, "token_mixer", None)
+        if attn is None:
+            continue
+        num_heads = getattr(attn, "num_heads", getattr(attn, "n_heads", 8))
+
+        # Extract W_V and W_O
+        if hasattr(attn, "qkv_proj"):
+            # TinyRecursiveModels Attention
+            d = attn.qkv_proj.weight.shape[0] // 3
+            W_V = attn.qkv_proj.weight[2*d:].detach().float().cpu().numpy()
+        elif hasattr(attn, "v_proj"):
+            W_V = attn.v_proj.weight.detach().float().cpu().numpy()
+        elif hasattr(attn, "in_proj_weight"):
+            d = attn.in_proj_weight.shape[0] // 3
+            W_V = attn.in_proj_weight[2*d:].detach().float().cpu().numpy()
+        else:
+            continue
+
+        if hasattr(attn, "o_proj"):
+            W_O = attn.o_proj.weight.detach().float().cpu().numpy()
+        elif hasattr(attn, "out_proj"):
+            W_O = attn.out_proj.weight.detach().float().cpu().numpy()
+        else:
+            d_model = W_V.shape[1]
+            W_O = np.eye(d_model, dtype=np.float32)
+
+        d_model = W_V.shape[1]
+        d_head = d_model // num_heads
+        head_scores = []
+        for h in range(num_heads):
+            V_h = W_V[h * d_head: (h + 1) * d_head]    # (d_head, d_model)
+            O_h = W_O[:, h * d_head: (h + 1) * d_head] # (d_model, d_head)
+            # Effective routing score: ||O_h V_h||_F captures representational capacity
+            routing = np.linalg.norm(O_h @ V_h, "fro")
+            head_scores.append(float(routing))
+
+        blocks_info.append({
+            "block_idx": block_idx,
+            "head_scores": head_scores,
+            "mean_score": float(np.mean(head_scores)),
+            "max_score": float(np.max(head_scores)),
+            "target_cell": target_cell,
+            "source_cell": source_cell,
+        })
+
+    return blocks_info
+
+
+@torch.no_grad()
+def attention_head_ablation(
+    model: torch.nn.Module,
+    inp: torch.Tensor,
+    label: torch.Tensor,
+    target_cells: list[int],
+    device: torch.device,
+    T: int = 4,
+    puzzle_emb_len: int = 16,
+) -> dict:
+    """Ablate individual attention heads and measure accuracy on motif cells.
+
+    For each L-level block, zeroes W_V for each head independently and
+    records the accuracy drop on target cells.
+
+    Returns:
+        Dict: clean_acc, per_block_head_drops {block_idx: [drop_per_head]}.
+    """
+    inp = inp.to(device)
+    lbl = label.to(device)
+    target_list = list(target_cells)
+
+    # Clean accuracy
+    logits = model(inp, T=T)
+    preds = logits.argmax(dim=-1)
+    # Labels are 1-indexed token ids; shift to 0-indexed digit
+    clean_acc = float((preds[:, target_list] == lbl[:, target_list] - 1).float().mean())
+    results: dict = {"clean_acc": clean_acc, "per_block_head_drops": {}}
+
+    for block_idx, layer in enumerate(model.trm_net.layers):
+        attn = getattr(layer, "token_mixer", None)
+        if attn is None:
+            continue
+        num_heads = getattr(attn, "num_heads", getattr(attn, "n_heads", 8))
+
+        proj = getattr(attn, "qkv_proj", getattr(attn, "v_proj", getattr(attn, "in_proj_weight", None)))
+        if proj is None:
+            continue
+
+        head_drops = []
+        for h in range(num_heads):
+            # Save and zero head h's V projection rows
+            if hasattr(attn, "qkv_proj"):
+                d = attn.qkv_proj.weight.shape[0] // 3
+                d_head = d // num_heads
+                orig = attn.qkv_proj.weight.data.clone()
+                attn.qkv_proj.weight.data[2*d + h*d_head: 2*d + (h+1)*d_head] = 0.0
+                ablated = model(inp, T=T)
+                attn.qkv_proj.weight.data.copy_(orig)
+            elif hasattr(attn, "v_proj"):
+                orig = attn.v_proj.weight.data.clone()
+                d_head = orig.shape[0] // num_heads
+                attn.v_proj.weight.data[h*d_head:(h+1)*d_head] = 0.0
+                ablated = model(inp, T=T)
+                attn.v_proj.weight.data.copy_(orig)
+            else:
+                d = attn.in_proj_weight.shape[0] // 3
+                d_head = d // num_heads
+                orig = attn.in_proj_weight.data.clone()
+                attn.in_proj_weight.data[2*d + h*d_head: 2*d + (h+1)*d_head] = 0.0
+                ablated = model(inp, T=T)
+                attn.in_proj_weight.data.copy_(orig)
+
+            abl_preds = ablated.argmax(dim=-1)
+            abl_acc = float((abl_preds[:, target_list] == lbl[:, target_list] - 1).float().mean())
+            head_drops.append(clean_acc - abl_acc)
+
+        results["per_block_head_drops"][block_idx] = head_drops
+
+    return results
+
+
+def run_single_arc(
+    ckpt_path: str,
+    device: torch.device,
+    arc_dataset_dir: str,
+    num_samples: int = 200,
+    T: int = 4,
+    max_motifs: int = 100,
+    output_dir: str | Path | None = None,
+    grid_h: int = 30,
+    grid_w: int = 30,
+) -> dict:
+    """Run ARC spatial circuit discovery on a single checkpoint."""
+    model, config = load_model(ckpt_path, "arc_trm", device)
+    puzzle_emb_len = config.get("puzzle_emb_len", 16)
+    dataloader = get_arc_dataloader(
+        arc_dataset_dir, num_samples=num_samples, batch_size=16, split="test"
+    )
+
+    all_motifs: list[dict] = []
+    all_inputs: list[torch.Tensor] = []
+    all_labels: list[torch.Tensor] = []
+
+    for inp_batch, lbl_batch in dataloader:
+        for i in range(inp_batch.size(0)):
+            motifs = find_arc_motifs(
+                inp_batch[i].numpy(), lbl_batch[i].numpy(),
+                grid_h=grid_h, grid_w=grid_w, puzzle_emb_len=puzzle_emb_len,
+            )
+            if motifs:
+                for m in motifs:
+                    m["puzzle_idx"] = len(all_inputs)
+                all_motifs.extend(motifs[:5])
+                all_inputs.append(inp_batch[i])
+                all_labels.append(lbl_batch[i])
+        if len(all_motifs) >= max_motifs:
+            break
+
+    logger.info("Found %d ARC motifs across %d puzzles", len(all_motifs), len(all_inputs))
+
+    if not all_motifs:
+        logger.warning("No ARC motifs found — try a different dataset")
+        return {"aggregate_stats": {}, "ablation": {}}
+
+    # Circuit extraction
+    circuit_scores: list[dict] = []
+    for m in all_motifs[:50]:
+        blocks = extract_attention_circuit(
+            model, m["cell_idx"], m["source_idx"], puzzle_emb_len=puzzle_emb_len
+        )
+        mean_score = float(np.mean([b["mean_score"] for b in blocks]))
+        circuit_scores.append({"motif": m, "mean_circuit_score": mean_score})
+
+    # Ablation on first batch
+    inp_batch  = torch.stack(all_inputs[:8]).unsqueeze(0).squeeze(0)
+    lbl_batch  = torch.stack(all_labels[:8]).unsqueeze(0).squeeze(0)
+    target_cells = list({m["cell_idx"] for m in all_motifs[:50]})
+    ablation = attention_head_ablation(
+        model, inp_batch, lbl_batch, target_cells, device, T=T,
+        puzzle_emb_len=puzzle_emb_len,
+    )
+
+    agg = {
+        "num_motifs": len(all_motifs),
+        "num_puzzles": len(all_inputs),
+        "mean_circuit_score": float(np.mean([c["mean_circuit_score"] for c in circuit_scores])),
+        "dominant_delta": (
+            int(all_motifs[0]["delta_r"]), int(all_motifs[0]["delta_c"])
+        ) if all_motifs else None,
+    }
+
+    result = {"aggregate_stats": agg, "ablation": ablation}
+
+    if output_dir:
+        save_json(result, "arc_circuit_analysis", output_dir)
+        _plot_arc_head_drops(ablation, output_dir)
+
+    return result
+
+
+def _plot_arc_head_drops(
+    ablation: dict,
+    output_dir: str | Path,
+) -> None:
+    set_paper_style()
+    per_block = ablation.get("per_block_head_drops", {})
+    if not per_block:
+        return
+    n_blocks = len(per_block)
+    fig, axes = plt.subplots(1, n_blocks, figsize=(5 * n_blocks, 4), squeeze=False)
+    for bi, (blk_idx, drops) in enumerate(sorted(per_block.items())):
+        ax = axes[0, bi]
+        colors = [COLORS["incorrect"] if d > 0 else COLORS["neutral"] for d in drops]
+        ax.bar(range(len(drops)), drops, color=colors, alpha=0.8)
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle=":")
+        ax.set_title(f"Block {blk_idx}")
+        ax.set_xlabel("Head index")
+        ax.set_ylabel("Accuracy drop")
+    fig.suptitle(f"Attention Head Ablation — Clean acc: {ablation['clean_acc']:.3f}", fontsize=12)
+    fig.tight_layout()
+    save_figure(fig, "arc_head_ablation", output_dir)
+
 
 def plot_circuit_diagram(
     circuit_info: list[dict],
@@ -482,34 +703,38 @@ def plot_circuit_diagram(
     for block_idx, block in enumerate(circuit_info):
         ax = axes[block_idx]
 
-        # Build 9×9 grid showing weight magnitude
-        weight_grid = np.zeros((9, 9))
+        # Build grid showing weight magnitude
         W_row = block["W_eff_target_row"]
-        for c in range(81):
-            r, col = divmod(c, 9)
+        n_cells = len(W_row)
+        grid_side = int(np.sqrt(n_cells))
+        weight_grid = np.zeros((grid_side, grid_side))
+        for c in range(n_cells):
+            r, col = divmod(c, grid_side)
             weight_grid[r, col] = abs(W_row[c])
 
         im = ax.imshow(weight_grid, cmap="YlOrRd", aspect="equal")
         ax.set_title(f"Block {block_idx}: Token Mixer\nRouting → Cell {target}")
 
         # Mark target cell
-        tr, tc = divmod(target, 9)
+        tr, tc = divmod(target, grid_side)
         ax.plot(tc, tr, "s", markersize=20, markerfacecolor="none",
                 markeredgecolor=COLORS["trm"], markeredgewidth=3)
 
         # Mark peer cells
         for peer in peers:
-            pr, pc = divmod(peer, 9)
+            pr, pc = divmod(peer, grid_side)
             ax.plot(pc, pr, "o", markersize=8, markerfacecolor="none",
                     markeredgecolor="lime", markeredgewidth=1.5)
 
-        # Draw 3×3 box borders
-        for i in range(0, 10, 3):
-            ax.axhline(i - 0.5, color="black", linewidth=2)
-            ax.axvline(i - 0.5, color="black", linewidth=2)
+        # Draw box borders (Sudoku 3×3 boxes; skip if non-square grid)
+        box_side = int(np.sqrt(grid_side))
+        if box_side * box_side == grid_side:
+            for i in range(0, grid_side + 1, box_side):
+                ax.axhline(i - 0.5, color="black", linewidth=2)
+                ax.axvline(i - 0.5, color="black", linewidth=2)
 
-        ax.set_xticks(range(9))
-        ax.set_yticks(range(9))
+        ax.set_xticks(range(grid_side))
+        ax.set_yticks(range(grid_side))
         plt.colorbar(im, ax=ax, shrink=0.8, label="|W_eff|")
 
     # Summary panel
@@ -637,30 +862,38 @@ def plot_ablation_results(
     output_dir: str | Path,
 ) -> None:
     """
-    Plot ablation results as a bar chart.
+    Plot ablation results as a waterfall bar chart.
+
+    Shows clean accuracy followed by each ablation condition.  The bars
+    are ordered so that a correctly-implemented ablation should show
+    monotonically decreasing height: Clean > -Token > -Channel > -Both
+    (though in practice the order of the individual conditions may vary).
     """
     set_paper_style()
 
     components = [
-        ("Clean", ablation_results["clean_acc_on_targets"]),
-        ("-Token In", ablation_results["ablate_token_mixer_incoming"]),
-        ("-Token Out", ablation_results["ablate_token_mixer_outgoing"]),
+        ("Clean",    ablation_results["clean_acc_on_targets"]),
+        ("-Token",   ablation_results["ablate_token_mixer"]),
         ("-Channel", ablation_results["ablate_channel_mixer"]),
-        ("-Both", ablation_results["ablate_both"]),
+        ("-Both",    ablation_results["ablate_both"]),
     ]
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(7, 5))
     labels, vals = zip(*components)
-    colors_list = [COLORS["correct"]] + [COLORS["incorrect"]] * 4
-    bars = ax.bar(labels, vals, color=colors_list, alpha=0.8, edgecolor="white")
+    colors_list = [COLORS["correct"]] + [COLORS["incorrect"]] * 3
+    bars = ax.bar(labels, vals, color=colors_list, alpha=0.85, edgecolor="white",
+                  linewidth=0.8)
 
     for bar, val in zip(bars, vals):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
-                f"{val:.3f}", ha="center", va="bottom", fontsize=10)
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.012,
+                f"{val:.3f}", ha="center", va="bottom", fontsize=10, fontweight="bold")
 
     ax.set_ylabel("Cell Accuracy on Naked Singles")
-    ax.set_title("Component Ablation: Which Circuit Parts Matter?")
-    ax.set_ylim(0, 1.05)
+    ax.set_title("Component Ablation: Token vs Channel Pathway")
+    ax.set_ylim(0, 1.08)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.4)
 
     fig.tight_layout()
     save_figure(fig, "ablation_results", output_dir)
@@ -866,41 +1099,87 @@ def run_single(
 def plot_global_ablation(
     all_results: list[dict],
     output_dir: str | Path,
+    domain: str = "",
 ) -> None:
     """
-    Plot global mean ablation bars with std error bars.
+    Plot global mean ablation waterfall with std error bars.
+
+    Uses the new ablation key schema: clean, token, channel, both.
     """
     set_paper_style()
 
+    if domain == "arc":
+        _plot_global_arc_ablation(all_results, output_dir)
+        return
+
     ablation_keys = [
         "clean_acc_on_targets",
-        "ablate_token_mixer_incoming",
-        "ablate_token_mixer_outgoing",
+        "ablate_token_mixer",
         "ablate_channel_mixer",
         "ablate_both",
     ]
-    labels = ["Clean", "-Token In", "-Token Out", "-Channel", "-Both"]
+    labels = ["Clean", "−Token", "−Channel", "−Both"]
 
-    means = []
-    stds = []
+    means: list[float] = []
+    stds:  list[float] = []
     for key in ablation_keys:
-        vals = [r["ablation"][key] for r in all_results if key in r["ablation"]]
-        means.append(np.mean(vals) if vals else 0)
-        stds.append(np.std(vals) if vals else 0)
+        vals = [r["ablation"][key] for r in all_results if key in r.get("ablation", {})]
+        means.append(float(np.mean(vals)) if vals else 0.0)
+        stds.append(float(np.std(vals))   if vals else 0.0)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    colors_list = [COLORS["correct"]] + [COLORS["incorrect"]] * 4
-    bars = ax.bar(labels, means, yerr=stds, color=colors_list, alpha=0.8,
-                  edgecolor="white", capsize=5)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    colors_list = [COLORS["correct"]] + [COLORS["incorrect"]] * 3
+    bars = ax.bar(labels, means, yerr=stds, color=colors_list, alpha=0.85,
+                  edgecolor="white", capsize=5, linewidth=0.8)
 
     for bar, m, s in zip(bars, means, stds):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
                 f"{m:.3f}\n±{s:.3f}", ha="center", va="bottom", fontsize=9)
 
     ax.set_ylabel("Cell Accuracy on Naked Singles")
-    ax.set_title(f"Component Ablation — Mean ± Std (n={len(all_results)} ckpts)")
+    domain_prefix = f"[{domain.upper()}] " if domain else ""
+    ax.set_title(f"{domain_prefix}Component Ablation — Mean ± Std (n={len(all_results)} ckpts)")
     ax.set_ylim(0, 1.15)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.4)
 
+    fig.tight_layout()
+    save_figure(fig, "global_ablation_results", output_dir)
+
+
+def _plot_global_arc_ablation(all_results: list[dict], output_dir: str | Path) -> None:
+    """Plot global ARC head drop across checkpoints."""
+    valid_ablations = [r["ablation"]["per_block_head_drops"] for r in all_results if r.get("ablation", {}).get("per_block_head_drops")]
+    if not valid_ablations:
+        return
+    
+    # Average across all checkpoints
+    aggregated_drops = {}
+    for ab in valid_ablations:
+        for bidx_str, drops in ab.items():
+            bidx = int(bidx_str) if isinstance(bidx_str, str) else bidx_str
+            aggregated_drops.setdefault(bidx, []).append(drops)
+            
+    n_blocks = len(aggregated_drops)
+    if n_blocks == 0:
+        return
+        
+    fig, axes = plt.subplots(1, n_blocks, figsize=(5 * n_blocks, 4), squeeze=False)
+    for bi, (blk_idx, multidrops) in enumerate(sorted(aggregated_drops.items())):
+        stacked = np.stack(multidrops) # (n_ckpts, n_heads)
+        mean_drops = stacked.mean(axis=0)
+        std_drops = stacked.std(axis=0)
+        
+        ax = axes[0, bi]
+        colors = [COLORS["incorrect"] if d > 0 else COLORS["neutral"] for d in mean_drops]
+        bars = ax.bar(range(len(mean_drops)), mean_drops, yerr=std_drops, color=colors, alpha=0.8, capsize=3)
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle=":")
+        ax.set_title(f"Block {blk_idx} Attention Head Drops")
+        ax.set_xlabel("Head Index")
+        ax.set_ylabel("Accuracy Drop")
+        
+    fig.suptitle(f"[ARC] Global Head Ablations (n={len(valid_ablations)} ckpts)", y=1.05)
     fig.tight_layout()
     save_figure(fig, "global_ablation_results", output_dir)
 
@@ -908,14 +1187,20 @@ def plot_global_ablation(
 def plot_global_peer_ratios(
     all_results: list[dict],
     output_dir: str | Path,
+    domain: str = "",
 ) -> None:
     """
-    Plot global peer/non-peer ratio distribution.
+    Plot aggregate circuit metric distribution.
     """
     set_paper_style()
 
-    ratios = [r["aggregate_stats"]["mean_peer_nonpeer_ratio"]
-              for r in all_results if r["aggregate_stats"]]
+    is_arc = domain == "arc"
+    metric_key = "mean_circuit_score" if is_arc else "mean_peer_nonpeer_ratio"
+    ylabel = "Circuit Score" if is_arc else "Peer / Non-Peer Ratio"
+    title_prefix = "Attention Motif Circuit Scores" if is_arc else "Token-Mixer Peer Routing"
+
+    ratios = [r["aggregate_stats"][metric_key]
+              for r in all_results if r.get("aggregate_stats") and metric_key in r["aggregate_stats"]]
 
     if not ratios:
         return
@@ -924,29 +1209,34 @@ def plot_global_peer_ratios(
     ax.bar(range(len(ratios)), ratios, color=COLORS["trm"], alpha=0.8)
     ax.axhline(np.mean(ratios), color=COLORS["critical"], linestyle="--",
                label=f"Mean: {np.mean(ratios):.2f} ± {np.std(ratios):.2f}")
-    ax.fill_between([-0.5, len(ratios) - 0.5],
-                    np.mean(ratios) - np.std(ratios),
-                    np.mean(ratios) + np.std(ratios),
-                    alpha=0.15, color=COLORS["critical"])
-    ax.set_xlabel("Checkpoint Index")
-    ax.set_ylabel("Peer / Non-Peer Weight Ratio")
-    ax.set_title(f"Token-Mixer Peer Routing Ratio (n={len(ratios)} ckpts)")
+    if len(ratios) > 1:
+        ax.fill_between([-0.5, len(ratios) - 0.5],
+                        np.mean(ratios) - np.std(ratios),
+                        np.mean(ratios) + np.std(ratios),
+                        alpha=0.15, color=COLORS["critical"])
+    ax.set_xlabel("Seed Index")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"[{domain.upper()}] {title_prefix} (n={len(ratios)} seeds)")
     ax.legend()
-
     fig.tight_layout()
-    save_figure(fig, "global_peer_ratios", output_dir)
+    save_figure(fig, f"global_{metric_key}s", output_dir)
 
 
 def plot_per_dataset_ablation(
     all_results: list[dict],
     data_size: int,
     output_dir: str | Path,
+    domain: str = "",
 ) -> None:
     """
     Plot mean ablation bars with std for a specific dataset size.
     """
     set_paper_style()
     ds_label = f"{data_size // 1000}k"
+    
+    if domain == "arc":
+        _plot_global_arc_ablation(all_results, output_dir)
+        return
 
     ablation_keys = [
         "clean_acc_on_targets",
@@ -984,15 +1274,21 @@ def plot_per_dataset_peer_ratios(
     all_results: list[dict],
     data_size: int,
     output_dir: str | Path,
+    domain: str = "",
 ) -> None:
     """
-    Plot peer/non-peer ratio distribution for a specific dataset size.
+    Plot peer/non-peer circuit score distribution for a specific dataset size.
     """
     set_paper_style()
     ds_label = f"{data_size // 1000}k"
 
-    ratios = [r["aggregate_stats"]["mean_peer_nonpeer_ratio"]
-              for r in all_results if r["aggregate_stats"]]
+    is_arc = domain == "arc"
+    metric_key = "mean_circuit_score" if is_arc else "mean_peer_nonpeer_ratio"
+    ylabel = "Circuit Score" if is_arc else "Peer / Non-Peer Ratio"
+    title_prefix = "Attention Motif Circuit Scores" if is_arc else "Token-Mixer Peer Routing"
+
+    ratios = [r["aggregate_stats"][metric_key]
+              for r in all_results if r.get("aggregate_stats") and metric_key in r["aggregate_stats"]]
 
     if not ratios:
         return
@@ -1007,11 +1303,11 @@ def plot_per_dataset_peer_ratios(
                         np.mean(ratios) + np.std(ratios),
                         alpha=0.15, color=COLORS["critical"])
     ax.set_xlabel("Seed Index")
-    ax.set_ylabel("Peer / Non-Peer Weight Ratio")
-    ax.set_title(f"Token-Mixer Peer Routing — {ds_label} dataset (n={len(ratios)} seeds)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"[{domain.upper()}] {title_prefix} — {ds_label} dataset (n={len(ratios)} seeds)")
     ax.legend()
     fig.tight_layout()
-    save_figure(fig, f"peer_ratios_dsize_{ds_label}", output_dir)
+    save_figure(fig, f"ratios_dsize_{ds_label}", output_dir)
 
 
 def plot_global_circuit_summary(
@@ -1109,27 +1405,47 @@ def main() -> None:
     parser.add_argument("--max-singles", type=int, default=50,
                        help="Max naked singles to analyze")
     parser.add_argument("--output-dir", default="outputs/mi/exp8")
-    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
+    parser.add_argument("--model-type", default="arc_trm",
+                        choices=["trm_v2", "original_trm", "arc_trm"],
+                        help="Model type to load")
+    parser.add_argument("--arc-dataset-dir", default=None,
+                        help="ARC dataset dir (required for arc_trm)")
+    parser.add_argument("--domain", default="", help="Domain prefix for plot titles")
+    parser.add_argument("--matched-budget", type=int, default=None,
+                        help="Optional budget to find nearest matched checkpoint step.")
     args = parser.parse_args()
 
     device = get_device()
 
     if args.trm_ckpt:
         # Single-checkpoint mode (backward compatible)
-        result = run_single(
-            args.trm_ckpt, args.model_type, device, args.num_samples, args.T,
-            args.max_singles, args.output_dir,
-        )
-        logger.info("Done! Results saved to %s", args.output_dir)
-        if result["aggregate_stats"]:
-            logger.info(
-                "Key finding: peer/nonpeer ratio = %.2f ± %.2f",
-                result["aggregate_stats"]["mean_peer_nonpeer_ratio"],
-                result["aggregate_stats"]["std_peer_nonpeer_ratio"],
+        ckpt_path = args.trm_ckpt
+        if args.matched_budget:
+            ckpt_path = resolve_matched_checkpoint(ckpt_path, args.matched_budget)
+
+        if args.model_type == "arc_trm":
+            result = run_single_arc(
+                ckpt_path, device, args.arc_dataset_dir,
+                num_samples=args.num_samples, T=args.T, 
+                max_motifs=args.max_singles, output_dir=args.output_dir,
             )
+        else:
+            result = run_single(
+                ckpt_path, args.model_type, device, args.num_samples, args.T,
+                args.max_singles, args.output_dir,
+            )
+            
+        logger.info("Done! Results saved to %s", args.output_dir)
+        if result.get("aggregate_stats"):
+            if "mean_peer_nonpeer_ratio" in result["aggregate_stats"]:
+                logger.info(
+                    "Key finding: peer/nonpeer ratio = %.2f ± %.2f",
+                    result["aggregate_stats"]["mean_peer_nonpeer_ratio"],
+                    result["aggregate_stats"]["std_peer_nonpeer_ratio"],
+                )
     else:
         # Multi-checkpoint mode
-        checkpoints = discover_checkpoints(args.trm_ckpt_dir, model_type="trm_v2")
+        checkpoints = discover_checkpoints(args.trm_ckpt_dir, model_type=args.model_type)
         if not checkpoints:
             logger.error("No TRM checkpoints found in %s", args.trm_ckpt_dir)
             return
@@ -1141,10 +1457,18 @@ def main() -> None:
             logger.info("═" * 60)
             logger.info("Running on checkpoint: %s", run_id)
 
-            result = run_single(
-                ckpt["path"], args.model_type, device, args.num_samples, args.T,
-                args.max_singles, str(per_dir),
-            )
+            if args.model_type == "arc_trm":
+                result = run_single_arc(
+                    ckpt["path"], device, args.arc_dataset_dir,
+                    num_samples=args.num_samples, T=args.T, 
+                    max_motifs=args.max_singles, output_dir=str(per_dir),
+                )
+            else:
+                result = run_single(
+                    ckpt["path"], args.model_type, device, args.num_samples, args.T,
+                    args.max_singles, str(per_dir),
+                )
+                
             result["run_id"] = run_id
             result["data_size"] = ckpt["data_size"]
             all_results.append(result)
@@ -1153,9 +1477,14 @@ def main() -> None:
         global_dir = Path(args.output_dir) / "global"
         global_dir.mkdir(parents=True, exist_ok=True)
 
-        plot_global_ablation(all_results, str(global_dir))
-        plot_global_peer_ratios(all_results, str(global_dir))
+        plot_global_ablation(all_results, str(global_dir), domain=args.domain)
+        plot_global_peer_ratios(all_results, str(global_dir), domain=args.domain)
 
+        is_arc = args.domain == "arc"
+        metric_key = "mean_circuit_score" if is_arc else "mean_peer_nonpeer_ratio"
+        
+        valid_results = [r for r in all_results if r.get("aggregate_stats") and metric_key in r["aggregate_stats"]]
+        
         global_summary = {
             "num_checkpoints": len(all_results),
             "checkpoints": [
@@ -1163,70 +1492,57 @@ def main() -> None:
                 for r in all_results
             ],
             "aggregate_stats": {
-                "mean_peer_ratio": float(np.mean([
-                    r["aggregate_stats"]["mean_peer_nonpeer_ratio"]
-                    for r in all_results if r["aggregate_stats"]
-                ])),
-                "std_peer_ratio": float(np.std([
-                    r["aggregate_stats"]["mean_peer_nonpeer_ratio"]
-                    for r in all_results if r["aggregate_stats"]
-                ])),
+                "mean_metric": float(np.mean([r["aggregate_stats"][metric_key] for r in valid_results])) if valid_results else 0.0,
+                "std_metric": float(np.std([r["aggregate_stats"][metric_key] for r in valid_results])) if valid_results else 0.0,
             },
             "ablation": {},
         }
 
         # Aggregate ablation stats
-        ablation_keys = [
-            "clean_acc_on_targets", "ablate_token_mixer_incoming",
-            "ablate_token_mixer_outgoing", "ablate_channel_mixer", "ablate_both",
-        ]
-        for key in ablation_keys:
-            vals = [r["ablation"][key] for r in all_results if key in r["ablation"]]
-            if vals:
-                global_summary["ablation"][key] = {
-                    "mean": float(np.mean(vals)),
-                    "std": float(np.std(vals)),
-                    "values": vals,
-                }
+        if is_arc:
+            ablation_keys = ["per_block_head_drops"]
+        else:
+            ablation_keys = [
+                "clean_acc_on_targets", "ablate_token_mixer_incoming",
+                "ablate_token_mixer_outgoing", "ablate_channel_mixer", "ablate_both",
+            ]
+            for key in ablation_keys:
+                vals = [r["ablation"][key] for r in all_results if r.get("ablation") and key in r["ablation"]]
+                if vals:
+                    global_summary["ablation"][key] = {
+                        "mean": float(np.mean(vals)),
+                        "std": float(np.std(vals)),
+                        "values": vals,
+                    }
 
         # Build human-readable summary
         summary: dict = {
             "num_checkpoints": len(all_results),
-            "mean_peer_nonpeer_ratio": round(
-                global_summary["aggregate_stats"]["mean_peer_ratio"], 2
-            ),
-            "std_peer_nonpeer_ratio": round(
-                global_summary["aggregate_stats"]["std_peer_ratio"], 2
-            ),
+            f"mean_{metric_key}": round(global_summary["aggregate_stats"]["mean_metric"], 2),
+            f"std_{metric_key}": round(global_summary["aggregate_stats"]["std_metric"], 2),
         }
 
         # Ablation comparison
-        ablation_summary = {}
-        for key in ablation_keys:
-            if key in global_summary["ablation"]:
-                ablation_summary[key] = round(
-                    global_summary["ablation"][key]["mean"], 4
-                )
+        if not is_arc:
+            ablation_summary = {}
+            for key in ablation_keys:
+                if key in global_summary["ablation"]:
+                    ablation_summary[key] = round(global_summary["ablation"][key]["mean"], 4)
 
-        if ablation_summary:
-            summary["ablation_mean_accs"] = ablation_summary
-            # Find most critical component (lowest accuracy after ablation, excluding clean)
-            ablation_conds = {
-                k: v for k, v in ablation_summary.items()
-                if k != "clean_acc_on_targets"
-            }
-            if ablation_conds:
-                most_critical = min(ablation_conds, key=ablation_conds.get)
-                clean_acc = ablation_summary.get("clean_acc_on_targets", 0)
-                most_critical_acc = ablation_conds[most_critical]
-                summary["most_critical_component"] = most_critical
-                summary["finding"] = (
-                    f"Most critical: {most_critical} (acc={most_critical_acc:.3f} "
-                    f"vs clean={clean_acc:.3f}). Peer/non-peer ratio = "
-                    f"{summary['mean_peer_nonpeer_ratio']:.2f} ± "
-                    f"{summary['std_peer_nonpeer_ratio']:.2f}, confirming "
-                    f"{'preferential peer attention' if summary['mean_peer_nonpeer_ratio'] > 1.5 else 'attention pattern'}"
-                )
+            if ablation_summary:
+                summary["ablation_mean_accs"] = ablation_summary
+                ablation_conds = {k: v for k, v in ablation_summary.items() if k != "clean_acc_on_targets"}
+                if ablation_conds:
+                    most_critical = min(ablation_conds, key=ablation_conds.get)
+                    clean_acc = ablation_summary.get("clean_acc_on_targets", 0)
+                    most_critical_acc = ablation_conds[most_critical]
+                    summary["most_critical_component"] = most_critical
+                    summary["finding"] = (
+                        f"Most critical: {most_critical} (acc={most_critical_acc:.3f} "
+                        f"vs clean={clean_acc:.3f}). {metric_key} = "
+                        f"{summary[f'mean_{metric_key}']:.2f} ± "
+                        f"{summary[f'std_{metric_key}']:.2f}"
+                    )
 
         global_summary["summary"] = summary
 
@@ -1251,31 +1567,32 @@ def main() -> None:
             logger.info("Generating dataset-size plots for %s (%d seeds)",
                         ds_label, len(ds_results))
 
-            plot_per_dataset_ablation(ds_results, ds, str(ds_dir))
-            plot_per_dataset_peer_ratios(ds_results, ds, str(ds_dir))
+            plot_per_dataset_ablation(ds_results, ds, str(ds_dir), domain=args.domain)
+            plot_per_dataset_peer_ratios(ds_results, ds, str(ds_dir), domain=args.domain)
             plot_global_circuit_summary(
                 ds_results, str(ds_dir), label=f"{ds_label} dataset",
             )
 
             # Aggregate ablation for this dataset size
             ds_ablation: dict = {}
-            for key in ablation_keys:
-                vals = [r["ablation"][key] for r in ds_results if key in r["ablation"]]
-                if vals:
-                    ds_ablation[key] = {
-                        "mean": float(np.mean(vals)),
-                        "std": float(np.std(vals)),
-                        "values": vals,
-                    }
+            if not is_arc:
+                for key in ablation_keys:
+                    vals = [r["ablation"][key] for r in ds_results if key in r["ablation"]]
+                    if vals:
+                        ds_ablation[key] = {
+                            "mean": float(np.mean(vals)),
+                            "std": float(np.std(vals)),
+                            "values": vals,
+                        }
 
             ds_peer_ratios = [
-                r["aggregate_stats"]["mean_peer_nonpeer_ratio"]
-                for r in ds_results if r["aggregate_stats"]
+                r["aggregate_stats"][metric_key]
+                for r in ds_results if r.get("aggregate_stats") and metric_key in r["aggregate_stats"]
             ]
             per_dsize_summary[ds_label] = {
                 "num_seeds": len(ds_results),
-                "mean_peer_ratio": float(np.mean(ds_peer_ratios)) if ds_peer_ratios else 0,
-                "std_peer_ratio": float(np.std(ds_peer_ratios)) if ds_peer_ratios else 0,
+                f"mean_{metric_key}": float(np.mean(ds_peer_ratios)) if ds_peer_ratios else 0,
+                f"std_{metric_key}": float(np.std(ds_peer_ratios)) if ds_peer_ratios else 0,
                 "ablation": ds_ablation,
             }
             save_json(per_dsize_summary[ds_label], f"results_dsize_{ds_label}", str(ds_dir))

@@ -24,6 +24,8 @@ from scripts.mi.shared.model_loader import (
     load_transformer,
     load_trm,
     load_model,
+    resolve_matched_checkpoint,
+    get_arc_dataloader,
 )
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, save_json, set_paper_style
@@ -229,18 +231,31 @@ def run_single_trm(
     num_samples: int = 500,
     T: int = 42,
     k: int = 5,
+    domain: str = "sudoku",
+    arc_dataset_dir: str | None = None,
 ) -> dict:
     """Run bottleneck analysis on a single TRM checkpoint."""
-    model, _ = load_model(ckpt_path, model_type, device)
-    dataloader = get_test_dataloader(num_samples=num_samples, batch_size=64)
+    model, config = load_model(ckpt_path, model_type, device)
+    
+    if domain == "arc":
+        if not arc_dataset_dir:
+            raise ValueError("--arc-dataset-dir required for ARC")
+        dataloader = get_arc_dataloader(
+            arc_dataset_dir, num_samples=num_samples, batch_size=32, split="test",
+        )
+        T_actual = config.get("H_cycles", 3) * config.get("L_cycles", 4)
+    else:
+        dataloader = get_test_dataloader(num_samples=num_samples, batch_size=64)
+        T_actual = T
+
     traj = collect_trm_dual_trajectories(
-        model, dataloader, device, T=T, max_samples=num_samples,
+        model, dataloader, device, T=T_actual, max_samples=num_samples,
     )
 
     step_indices = sorted(set(
-        list(range(min(5, T))) +
-        list(range(0, T, max(1, T // 8))) +
-        [T - 1]
+        list(range(min(5, T_actual))) +
+        list(range(0, T_actual, max(1, T_actual // 8))) +
+        [T_actual - 1]
     ))
 
     return run_bottleneck_analysis(
@@ -426,7 +441,10 @@ def main() -> None:
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--k", type=int, default=5, help="k for KSG MI estimator")
     parser.add_argument("--output-dir", default="outputs/mi/exp3")
-    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
+    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm", "arc_trm"], help="Model type to load")
+    parser.add_argument("--arc-dataset-dir", default=None, help="ARC dataset dir")
+    parser.add_argument("--domain", default="sudoku", choices=["sudoku", "arc"], help="Domain")
+    parser.add_argument("--matched-budget", type=int, default=None, help="Matched budget")
     args = parser.parse_args()
 
     has_single = args.trm_ckpt or args.trans_ckpt
@@ -443,8 +461,11 @@ def main() -> None:
         all_results = {}
 
         if args.trm_ckpt:
-            trm_res = run_single_trm(args.trm_ckpt, args.model_type, device, args.num_samples,
-                                     args.T, args.k)
+            ckpt_path = args.trm_ckpt
+            if args.matched_budget:
+                ckpt_path = resolve_matched_checkpoint(ckpt_path, args.matched_budget)
+            trm_res = run_single_trm(ckpt_path, args.model_type, device, args.num_samples,
+                                     args.T, args.k, domain=args.domain, arc_dataset_dir=args.arc_dataset_dir)
             all_results["trm"] = trm_res
         if args.trans_ckpt:
             trans_res = run_single_transformer(args.trans_ckpt, device,

@@ -64,16 +64,22 @@ def main() -> None:
     parser.add_argument("--experiments", nargs="+", type=int,
                        default=[1, 2, 3, 4, 5, 6, 7, 8],
                        help="Which experiments to run (default: all 1-8)")
-    parser.add_argument("--output-base", default="outputs/mi",
-                       help="Base output directory")
+    parser.add_argument("--output-base", default=None,
+                       help="Base output dir (default: outputs/mi/{domain})")
     parser.add_argument("--max-trm-ckpts", type=int, default=None,
                        help="Max TRM checkpoints (for testing)")
     parser.add_argument("--max-trans-ckpts", type=int, default=None,
                        help="Max Transformer checkpoints (for testing)")
     parser.add_argument("--num-samples", type=int, default=200,
                        help="Num samples for experiments")
+    parser.add_argument("--domain", default="sudoku", choices=["sudoku", "arc"],
+                       help="Domain: sudoku (MLP-T) or arc (attention TRM)")
+    parser.add_argument("--arc-dataset-dir", default=None,
+                       help="ARC dataset dir required when --domain arc")
     args = parser.parse_args()
 
+    model_type   = "arc_trm" if args.domain == "arc" else "original_trm"
+    output_base  = args.output_base or f"outputs/mi/{args.domain}"
     ckpt_dir = str(Path(args.ckpt_dir).resolve())
     results = {}
 
@@ -88,8 +94,10 @@ def main() -> None:
             exp_args = [
                 "--trm-ckpt-dir", ckpt_dir,
                 "--num-samples", str(args.num_samples),
-                "--output-dir", f"{args.output_base}/exp1",
+                "--output-dir", f"{output_base}/exp1",
             ]
+            if args.domain:
+                exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
                 "exp1_causal_interventions.py", exp_args, "Exp 1"
             )
@@ -97,12 +105,16 @@ def main() -> None:
         elif exp_num == 2:
             exp_args = [
                 "--trm-ckpt-dir", ckpt_dir,
-                "--trans-ckpt-dir", ckpt_dir,
+                "--model-type", model_type,
                 "--num-samples", str(args.num_samples),
-                "--output-dir", f"{args.output_base}/exp2",
+                "--output-dir", f"{output_base}/exp2",
             ]
+            if args.domain:
+                exp_args += ["--domain", args.domain]
+            if args.domain == "arc" and args.arc_dataset_dir:
+                exp_args += ["--arc-dataset-dir", args.arc_dataset_dir]
             results[exp_num] = run_experiment(
-                "exp2_representation_similarity.py", exp_args, "Exp 2"
+                "representation_similarity.py", exp_args, "Exp 2"
             )
 
         elif exp_num == 3:
@@ -110,8 +122,10 @@ def main() -> None:
                 "--trm-ckpt-dir", ckpt_dir,
                 "--trans-ckpt-dir", ckpt_dir,
                 "--num-samples", str(args.num_samples),
-                "--output-dir", f"{args.output_base}/exp3",
+                "--output-dir", f"{output_base}/exp3",
             ]
+            if args.domain:
+                exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
                 "exp3_information_bottleneck.py", exp_args, "Exp 3"
             )
@@ -121,8 +135,10 @@ def main() -> None:
                 "--trm-ckpt-dir", ckpt_dir,
                 "--trans-ckpt-dir", ckpt_dir,
                 "--num-samples", str(args.num_samples),
-                "--output-dir", f"{args.output_base}/exp4",
+                "--output-dir", f"{output_base}/exp4",
             ]
+            if args.domain:
+                exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
                 "exp4_intrinsic_dimensionality.py", exp_args, "Exp 4"
             )
@@ -132,8 +148,10 @@ def main() -> None:
                 "--trm-ckpt-dir", ckpt_dir,
                 "--trans-ckpt-dir", ckpt_dir,
                 "--num-samples", str(min(args.num_samples, 500)),
-                "--output-dir", f"{args.output_base}/exp5",
+                "--output-dir", f"{output_base}/exp5",
             ]
+            if args.domain:
+                exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
                 "exp5_ood_blanks_sweep.py", exp_args, "Exp 5"
             )
@@ -141,30 +159,46 @@ def main() -> None:
         elif exp_num == 6:
             exp_args = [
                 "--trm-ckpt-dir", ckpt_dir,
+                "--model-type", model_type,
                 "--num-samples", str(args.num_samples),
-                "--output-dir", f"{args.output_base}/exp6",
+                "--output-dir", f"{output_base}/exp6",
             ]
+            if args.domain:
+                exp_args += ["--domain", args.domain]
+            if args.domain == "arc" and args.arc_dataset_dir:
+                exp_args += ["--arc-dataset-dir", args.arc_dataset_dir]
             results[exp_num] = run_experiment(
-                "exp6_superposition_analysis.py", exp_args, "Exp 6"
+                "superposition_analysis.py", exp_args, "Exp 6"
             )
 
         elif exp_num == 7:
             exp_args = [
                 "--trm-ckpt-dir", ckpt_dir,
-                "--output-dir", f"{args.output_base}/exp7",
+                "--model-type", model_type,
+                "--num-samples", str(args.num_samples),
+                "--output-dir", f"{output_base}/exp7",
             ]
+            if args.domain == "arc" and args.arc_dataset_dir:
+                exp_args += ["--arc-dataset-dir", args.arc_dataset_dir]
+            if args.domain:
+                exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
-                "exp7_token_mixer_dissection.py", exp_args, "Exp 7"
+                "token_mixer_dissection.py", exp_args, "Exp 7"
             )
 
         elif exp_num == 8:
             exp_args = [
                 "--trm-ckpt-dir", ckpt_dir,
+                "--model-type", model_type,
                 "--num-samples", str(args.num_samples),
-                "--output-dir", f"{args.output_base}/exp8",
+                "--output-dir", f"{output_base}/exp8",
             ]
+            if args.domain == "arc" and args.arc_dataset_dir:
+                exp_args += ["--arc-dataset-dir", args.arc_dataset_dir]
+            if args.domain:
+                exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
-                "exp8_circuit_discovery.py", exp_args, "Exp 8"
+                "circuit_discovery.py", exp_args, "Exp 8"
             )
 
         else:

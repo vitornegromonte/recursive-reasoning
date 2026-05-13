@@ -61,6 +61,28 @@ def set_paper_style() -> None:
     })
 
 
+def _label_from_dir(dir_name: str) -> str | None:
+    """Derive a short human-readable label from an output directory name.
+
+    Recognises:
+      - n1k, n5k, n10k, random, global              → as-is
+      - n1k_seed0, n5k_seed2                        → "n1k-seed0"
+      - trm-sudoku-n1000-seed1, trm-arc-n5000-seed2 → "n1k-seed1"
+    Returns None if the name is not a recognised model/size label.
+    """
+    import re as _re
+    if dir_name in ("n1k", "n5k", "n10k", "random", "global"):
+        return dir_name
+    m = _re.match(r"^(n\d+k)_seed(\d+)$", dir_name)
+    if m:
+        return f"{m.group(1)}-seed{m.group(2)}"
+    m = _re.match(r"^trm-(?:sudoku|arc)-n(\d+)-seed(\d+)", dir_name)
+    if m:
+        size_k = int(m.group(1)) // 1000
+        return f"n{size_k}k-seed{m.group(2)}"
+    return None
+
+
 def save_figure(fig: plt.Figure, name: str, output_dir: str | Path) -> Path:
     """Save a figure as PNG.
 
@@ -73,15 +95,14 @@ def save_figure(fig: plt.Figure, name: str, output_dir: str | Path) -> Path:
         Path to the saved PNG file.
     """
     out_dir = Path(output_dir)
-    
-    # Auto-label plots based on the output directory (e.g., n1k, n5k, n10k, random)
-    model_label = out_dir.name
-    if model_label in ["n1k", "n5k", "n10k", "random", "global"]:
-        # Append label to filename
-        name = f"{name}_{model_label}"
-        
-        # Append label to figure title
-        label_str = f" [{model_label.upper()}]"
+
+    human_label = _label_from_dir(out_dir.name)
+    if human_label is not None:
+        # Append short label to filename so sibling files don't collide
+        name = f"{name}_{human_label}"
+
+        # Annotate figure title
+        label_str = f" [{human_label.upper()}]"
         assigned = False
         if getattr(fig, "_suptitle", None) and fig._suptitle.get_text():
             t = fig._suptitle.get_text()
@@ -94,16 +115,18 @@ def save_figure(fig: plt.Figure, name: str, output_dir: str | Path) -> Path:
                 if t and label_str not in t:
                     ax.set_title(f"{t}{label_str}")
                     assigned = True
-                    
-        # Fallback if no titles existed
+                    break
+
         if not assigned:
-            fig.text(0.5, 0.98, label_str.strip(), ha='center', va='top', fontsize=12, fontweight='bold')
+            fig.text(0.5, 0.98, label_str.strip(), ha="center", va="top",
+                     fontsize=12, fontweight="bold")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{name}.png"
     fig.savefig(path)
     plt.close(fig)
     return path
+
 
 
 def save_json(data: Any, name: str, output_dir: str | Path) -> Path:

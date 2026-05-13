@@ -47,6 +47,7 @@ def collect_trm_dual_trajectories(
     model.eval()
 
     all_z_H: list[torch.Tensor] = []
+    all_z_H_pre_norm: list[torch.Tensor] = []
     all_z_L: list[torch.Tensor] = []
     all_preds_per_step: list[torch.Tensor] = []
     all_inputs: list[torch.Tensor] = []
@@ -62,6 +63,34 @@ def collect_trm_dual_trajectories(
         y_target = y_target.to(device)
         batch_size = x_raw.size(0)
 
+        # Monkey-patch rms_norm to capture pre-norm activations
+        # ARC TRM / Original TRM use models.layers
+        import models.layers
+        import models.recursive_reasoning.trm
+        # TRMv2 uses src.models.trm_operator
+        import src.models.trm_operator
+        
+        original_layers_rms_norm = models.layers.rms_norm
+        original_arc_trm_rms_norm = models.recursive_reasoning.trm.rms_norm
+        original_trm_v2_rms_norm = src.models.trm_operator.rms_norm
+        last_pre_norm = [None]
+        
+        def hooked_layers_rms_norm(hidden_states, variance_epsilon):
+            last_pre_norm[0] = hidden_states
+            return original_layers_rms_norm(hidden_states, variance_epsilon)
+            
+        def hooked_arc_trm_rms_norm(hidden_states, variance_epsilon):
+            last_pre_norm[0] = hidden_states
+            return original_arc_trm_rms_norm(hidden_states, variance_epsilon)
+            
+        def hooked_trm_v2_rms_norm(hidden_states, eps=1e-5):
+            last_pre_norm[0] = hidden_states
+            return original_trm_v2_rms_norm(hidden_states, eps=eps)
+            
+        models.layers.rms_norm = hooked_layers_rms_norm
+        models.recursive_reasoning.trm.rms_norm = hooked_arc_trm_rms_norm
+        src.models.trm_operator.rms_norm = hooked_trm_v2_rms_norm
+
         # Embed input
         x_emb = model.embed(x_raw)
         seq_len = x_emb.size(1)
@@ -70,6 +99,7 @@ def collect_trm_dual_trajectories(
         z_H, z_L = model.init_state(batch_size, seq_len, device)
 
         batch_z_H = []
+        batch_z_H_pre_norm = []
         batch_z_L = []
         batch_preds = []
 
@@ -78,8 +108,10 @@ def collect_trm_dual_trajectories(
             z_L = model.trm_net(x_emb, z_H, z_L)
             # Answer update: z_H ← f(z_H + z_L)
             z_H = model.trm_net(z_H, z_L)
+            z_H_pre_norm = last_pre_norm[0].detach()
 
             batch_z_H.append(z_H.cpu())
+            batch_z_H_pre_norm.append(z_H_pre_norm.cpu())
             batch_z_L.append(z_L.cpu())
 
             # Per-step predictions
@@ -89,19 +121,25 @@ def collect_trm_dual_trajectories(
 
         # Stack to (batch, T, 81, hidden) and (batch, T, 81)
         batch_z_H_t = torch.stack(batch_z_H, dim=1)
+        batch_z_H_pre_norm_t = torch.stack(batch_z_H_pre_norm, dim=1)
         batch_z_L_t = torch.stack(batch_z_L, dim=1)
         batch_preds_t = torch.stack(batch_preds, dim=1)
 
         all_z_H.append(batch_z_H_t)
+        all_z_H_pre_norm.append(batch_z_H_pre_norm_t)
         all_z_L.append(batch_z_L_t)
         all_preds_per_step.append(batch_preds_t)
         all_inputs.append(x_raw.cpu())
         all_targets.append(y_target.cpu())
 
+        models.layers.rms_norm = original_layers_rms_norm
+        models.recursive_reasoning.trm.rms_norm = original_arc_trm_rms_norm
+        src.models.trm_operator.rms_norm = original_trm_v2_rms_norm
         collected += batch_size
 
     # Truncate to max_samples
     z_H_all = torch.cat(all_z_H, dim=0)
+    z_H_pre_norm_all = torch.cat(all_z_H_pre_norm, dim=0)
     z_L_all = torch.cat(all_z_L, dim=0)
     preds_all = torch.cat(all_preds_per_step, dim=0)
     inputs_all = torch.cat(all_inputs, dim=0)
@@ -109,6 +147,7 @@ def collect_trm_dual_trajectories(
 
     if max_samples is not None:
         z_H_all = z_H_all[:max_samples]
+        z_H_pre_norm_all = z_H_pre_norm_all[:max_samples]
         z_L_all = z_L_all[:max_samples]
         preds_all = preds_all[:max_samples]
         inputs_all = inputs_all[:max_samples]
@@ -116,6 +155,7 @@ def collect_trm_dual_trajectories(
 
     return {
         "z_H": z_H_all,
+        "z_H_pre_norm": z_H_pre_norm_all,
         "z_L": z_L_all,
         "preds_per_step": preds_all,
         "inputs": inputs_all,

@@ -16,11 +16,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from scripts.mi.shared.model_loader import (
+    get_arc_dataloader,
     get_device,
     get_test_dataloader,
     load_transformer,
     load_trm,
     load_model,
+    resolve_matched_checkpoint,
 )
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, save_json, set_paper_style
@@ -85,10 +87,22 @@ def run_single_trm(
     device=None,
     num_samples: int = 200,
     T: int = 42,
+    domain: str = "sudoku",
+    arc_dataset_dir: str | None = None,
 ) -> dict:
     """Run CKA on a single TRM checkpoint. Returns {cka_matrix, steps}."""
-    model, _ = load_model(ckpt_path, model_type, device)
-    dataloader = get_test_dataloader(num_samples=num_samples, batch_size=32)
+    model, config = load_model(ckpt_path, model_type, device)
+
+    if domain == "arc":
+        if not arc_dataset_dir:
+            raise ValueError("--arc-dataset-dir is required for domain=arc")
+        dataloader = get_arc_dataloader(
+            arc_dataset_dir, num_samples=num_samples, batch_size=32, split="test",
+        )
+        T = config.get("H_cycles", 3) * config.get("L_cycles", 4)
+    else:
+        dataloader = get_test_dataloader(num_samples=num_samples, batch_size=32)
+
     traj = collect_trm_dual_trajectories(
         model, dataloader, device, T=T, max_samples=num_samples
     )
@@ -294,7 +308,15 @@ def main() -> None:
     parser.add_argument("--num-samples", type=int, default=200)
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--output-dir", default="outputs/mi/exp2")
-    parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
+    parser.add_argument("--model-type", default="trm_v2",
+                        choices=["trm_v2", "original_trm", "arc_trm"],
+                        help="Model type to load")
+    parser.add_argument("--domain", default="sudoku", choices=["sudoku", "arc"],
+                        help="Domain: sudoku or arc")
+    parser.add_argument("--arc-dataset-dir", default=None,
+                        help="ARC dataset dir (required for --domain arc)")
+    parser.add_argument("--matched-budget", type=int, default=None,
+                        help="Optional budget to find nearest matched checkpoint step.")
     args = parser.parse_args()
 
     has_single = args.trm_ckpt or args.trans_ckpt
@@ -312,9 +334,18 @@ def main() -> None:
         trans_cka_mat = trans_steps = None
 
         if args.trm_ckpt:
-            r = run_single_trm(args.trm_ckpt, args.model_type, device, args.num_samples, args.T)
+            ckpt_path = args.trm_ckpt
+            if args.matched_budget:
+                ckpt_path = resolve_matched_checkpoint(ckpt_path, args.matched_budget)
+
+            r = run_single_trm(
+                ckpt_path, args.model_type, device, args.num_samples, args.T,
+                domain=args.domain, arc_dataset_dir=args.arc_dataset_dir,
+            )
             trm_cka_mat, trm_steps = r["cka_matrix"], r["steps"]
-            results["trm"] = {"cka_matrix": trm_cka_mat.tolist(), "steps": trm_steps}
+            mask = ~np.eye(trm_cka_mat.shape[0], dtype=bool)
+            mean_cka = float(trm_cka_mat[mask].mean()) if trm_cka_mat.shape[0] > 1 else 1.0
+            results["trm"] = {"cka_matrix": trm_cka_mat.tolist(), "steps": trm_steps, "mean_cka": mean_cka}
 
         if args.trans_ckpt:
             r = run_single_transformer(args.trans_ckpt, device, args.num_samples)
@@ -330,14 +361,18 @@ def main() -> None:
         all_trans_results = []
 
         if args.trm_ckpt_dir:
-            trm_ckpts = discover_checkpoints(args.trm_ckpt_dir, model_type="trm_v2")
+            ckpt_model_type = "arc_trm" if args.domain == "arc" else args.model_type
+            trm_ckpts = discover_checkpoints(args.trm_ckpt_dir, model_type=ckpt_model_type)
             for ckpt in trm_ckpts:
                 run_id = ckpt["run_id"]
                 per_dir = Path(args.output_dir) / run_id
                 logger.info("═" * 60)
                 logger.info("TRM checkpoint: %s", run_id)
 
-                r = run_single_trm(ckpt["path"], args.model_type, device, args.num_samples, args.T)
+                r = run_single_trm(
+                    ckpt["path"], ckpt_model_type, device, args.num_samples, args.T,
+                    domain=args.domain, arc_dataset_dir=args.arc_dataset_dir,
+                )
                 r["run_id"] = run_id
                 r["data_size"] = ckpt["data_size"]
                 all_trm_results.append(r)
@@ -345,8 +380,10 @@ def main() -> None:
                 # Per-checkpoint plot
                 plot_cka_matrices(r["cka_matrix"], r["steps"], None, None,
                                   str(per_dir), title_suffix=f"({run_id})")
+                mask = ~np.eye(r["cka_matrix"].shape[0], dtype=bool)
+                mean_cka = float(r["cka_matrix"][mask].mean()) if r["cka_matrix"].shape[0] > 1 else 1.0
                 save_json(
-                    {"cka_matrix": r["cka_matrix"].tolist(), "steps": r["steps"]},
+                    {"cka_matrix": r["cka_matrix"].tolist(), "steps": r["steps"], "mean_cka": mean_cka},
                     "cka_results", str(per_dir),
                 )
 

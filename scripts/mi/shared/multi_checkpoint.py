@@ -15,9 +15,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Pattern: {model_type}-e{epochs}-d{data_size}k-dim{dim}-{timestamp}
-CKPT_PATTERN = re.compile(
+# Pattern 1: {model_type}-e{epochs}-d{data_size}k-dim{dim}-{timestamp}
+SUDOKU_CKPT_PATTERN = re.compile(
     r"^(?P<model_type>[\w_]+)-e(?P<epochs>\d+)-d(?P<data_size>\d+)k-dim(?P<dim>\d+)-(?P<timestamp>\d{8}_\d{6})$"
+)
+
+# Pattern 2: trm-arc-n{data_size}-seed{seed_idx}-e{epochs}
+ARC_CKPT_PATTERN = re.compile(
+    r"^trm-arc-n(?P<data_size>\d+)-seed(?P<seed_idx>\d+)-e(?P<epochs>\d+)$"
 )
 
 
@@ -52,40 +57,66 @@ def discover_checkpoints(
         if subdir.name == "olds":
             continue
 
-        match = CKPT_PATTERN.match(subdir.name)
-        if not match:
+        m_sudoku = SUDOKU_CKPT_PATTERN.match(subdir.name)
+        m_arc = ARC_CKPT_PATTERN.match(subdir.name)
+
+        if m_arc and model_type == "arc_trm":
+            ckpt_path = subdir / ckpt_name
+            if not ckpt_path.exists():
+                # Fallback to the latest step_* file if best.pt is missing
+                step_files = [p for p in subdir.glob("step_*") if p.name.split("_", 1)[1].isdigit()]
+                if step_files:
+                    ckpt_path = sorted(step_files, key=lambda p: int(p.name.split("_", 1)[1]))[-1]
+                else:
+                    logger.debug("No %s or step_* in %s, skipping", ckpt_name, subdir.name)
+                    continue
+            
+            results.append({
+                "path": str(ckpt_path),
+                "run_id": subdir.name,
+                "model_type": "arc_trm",
+                "epochs": int(m_arc.group("epochs")),
+                "data_size": int(m_arc.group("data_size")),
+                "seed_idx": int(m_arc.group("seed_idx")),
+                "dim": 0,
+                "timestamp": "00000000_000000",
+            })
+            continue
+            
+        if m_sudoku:
+            if m_sudoku.group("model_type") != model_type:
+                continue
+
+            ckpt_path = subdir / ckpt_name
+            if not ckpt_path.exists():
+                logger.debug("No %s in %s, skipping", ckpt_name, subdir.name)
+                continue
+
+            results.append({
+                "path": str(ckpt_path),
+                "run_id": subdir.name,
+                "model_type": m_sudoku.group("model_type"),
+                "epochs": int(m_sudoku.group("epochs")),
+                "data_size": int(m_sudoku.group("data_size")) * 1000,
+                "dim": int(m_sudoku.group("dim")),
+                "timestamp": m_sudoku.group("timestamp"),
+            })
             continue
 
-        if match.group("model_type") != model_type:
-            continue
-
-        ckpt_path = subdir / ckpt_name
-        if not ckpt_path.exists():
-            logger.debug("No %s in %s, skipping", ckpt_name, subdir.name)
-            continue
-
-        results.append({
-            "path": str(ckpt_path),
-            "run_id": subdir.name,
-            "model_type": match.group("model_type"),
-            "epochs": int(match.group("epochs")),
-            "data_size": int(match.group("data_size")) * 1000,
-            "dim": int(match.group("dim")),
-            "timestamp": match.group("timestamp"),
-        })
-
-    # Sort by (data_size, timestamp) and assign seed indices per data_size
-    results.sort(key=lambda x: (x["data_size"], x["timestamp"]))
+    # Sort by (data_size, timestamp) and assign seed indices per data_size for Sudoku
+    results.sort(key=lambda x: (x["data_size"], x["timestamp"], x.get("seed_idx", 0)))
 
     # Assign seed_idx within each data_size group
+    # Assign seed_idx within each data_size group (if missing, which happens for Sudoku)
     current_data_size = None
     seed_counter = 0
     for r in results:
         if r["data_size"] != current_data_size:
             current_data_size = r["data_size"]
             seed_counter = 0
-        r["seed_idx"] = seed_counter
-        seed_counter += 1
+        if "seed_idx" not in r:
+            r["seed_idx"] = seed_counter
+            seed_counter += 1
 
     logger.info(
         "Discovered %d %s checkpoints: %s",

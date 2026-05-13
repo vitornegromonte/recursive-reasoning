@@ -16,6 +16,58 @@ from torch.utils.data import DataLoader
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Architecture configs
+# ---------------------------------------------------------------------------
+
+# Sudoku MLP-T TRM (matches run_sudoku.sh)
+SUDOKU_ARCH_CONFIG = dict(
+    hidden_size=512,
+    num_heads=8,
+    expansion=4,
+    H_cycles=3,
+    L_cycles=6,
+    H_layers=0,
+    L_layers=2,
+    pos_encodings="none",
+    forward_dtype="bfloat16",
+    mlp_t=True,
+    puzzle_emb_ndim=512,
+    puzzle_emb_len=16,
+    halt_exploration_prob=0.1,
+    halt_max_steps=16,
+    no_ACT_continue=True,
+    batch_size=64,
+    vocab_size=11,       # PAD + digits 1-9 + blank
+    seq_len=81,
+    num_puzzle_identifiers=1,
+    causal=False,
+)
+
+# ARC attention TRM (matches run_arc.sh)
+ARC_ARCH_CONFIG = dict(
+    hidden_size=512,
+    num_heads=8,
+    expansion=4,
+    H_cycles=3,
+    L_cycles=4,
+    H_layers=0,
+    L_layers=2,
+    pos_encodings="rope",
+    forward_dtype="bfloat16",
+    mlp_t=False,
+    puzzle_emb_ndim=512,
+    puzzle_emb_len=16,
+    halt_exploration_prob=0.1,
+    halt_max_steps=16,
+    no_ACT_continue=True,
+    batch_size=128,
+    vocab_size=12,       # PAD + EOS + 10 colors
+    seq_len=900,         # 30x30 grid
+    num_puzzle_identifiers=481,
+    causal=False,
+)
+
 
 def _resolve_config(checkpoint_path: Path) -> dict[str, Any]:
     """Resolve config.json from logs/ directory matching checkpoint name.
@@ -193,29 +245,34 @@ class OriginalTRMAdapter(nn.Module):
         self._cos_sin = None              # Will be set on first forward if needed
         self.trm_net = _OriginalTRMNetAdapter(self.inner, self._get_cos_sin)
 
-        # Alias layer names so MI experiments (exp7, exp8) can introspect them correctly
+        # Alias layer names so MI experiments can introspect them correctly
         for layer in self.inner.L_level.layers:
-            if hasattr(layer, "mlp_t") and not hasattr(layer, "token_mixer"):
-                layer.token_mixer = layer.mlp_t
+            # MLP-T: alias mlp_t as token_mixer
+            if getattr(layer, "mlp_t", None) not in (None, False):
+                if not hasattr(layer, "token_mixer"):
+                    layer.token_mixer = layer.mlp_t
+            # Attention TRM: alias self_attn as token_mixer
+            elif hasattr(layer, "self_attn") and not hasattr(layer, "token_mixer"):
+                layer.token_mixer = layer.self_attn
+            # Channel mixer
             if hasattr(layer, "mlp") and not hasattr(layer, "channel_mixer"):
                 layer.channel_mixer = layer.mlp
 
     # -- public TRMv2-compatible API ------------------------------------------
 
-    def embed(self, x: torch.Tensor) -> torch.Tensor:
-        """Embed one-hot input (B, 81, 10) → (B, seq_len+puzzle_emb_len, H).
+    def embed(self, x: torch.Tensor, puzzle_identifiers: torch.Tensor | None = None) -> torch.Tensor:
+        """Embed input (either one-hot or integer indices)."""
+        if x.dtype in (torch.float32, torch.float64, torch.bfloat16, torch.float16):
+            # One-hot from Sudoku (B, 81, 10). Convert to integer class indices.
+            x_int = x.argmax(dim=-1)
+        else:
+            # Integer indices from ARC (B, 900)
+            x_int = x
 
-        Converts one-hot back to integer indices and runs the original
-        _input_embeddings which prepends puzzle embedding positions.
-        """
-        # x is one-hot (B, 81, 10) from the MI dataloader.
-        # Convert to integer class indices expected by embed_tokens.
-        x_int = x.argmax(dim=-1)  # (B, 81)
+        if puzzle_identifiers is None:
+            puzzle_identifiers = torch.zeros(x.size(0), dtype=torch.int32, device=x.device)
 
-        # Puzzle identifiers: use 0 for all (default when not puzzle-specific)
-        puzzle_ids = torch.zeros(x.size(0), dtype=torch.int32, device=x.device)
-
-        return self.inner._input_embeddings(x_int, puzzle_ids)
+        return self.inner._input_embeddings(x_int, puzzle_identifiers)
 
     def init_state(
         self, batch_size: int, seq_len: int, device: torch.device
@@ -234,19 +291,20 @@ class OriginalTRMAdapter(nn.Module):
         return z_H, z_L
 
     def forward(
-        self, x: torch.Tensor, T: int = 1, L_cycles: int = 1
+        self, x: torch.Tensor, puzzle_identifiers: torch.Tensor | None = None, T: int = 1, L_cycles: int = 1
     ) -> torch.Tensor:
         """Run a full forward pass matching TRMv2's calling convention.
 
         Args:
-            x:        One-hot input (B, 81, 10).
+            x:        Input (one-hot or integers).
+            puzzle_identifiers: Optional dataset IDs.
             T:        Number of H-level steps (H_cycles).
             L_cycles: Number of L-level steps per H step.
 
         Returns:
-            Logits (B, 81, vocab_size).
+            Logits (B, S, vocab_size).
         """
-        x_emb = self.embed(x)                                       # (B, S+P, H)
+        x_emb = self.embed(x, puzzle_identifiers=puzzle_identifiers)  # (B, S+P, H)
         B, S, _ = x_emb.shape
         z_H, z_L = self.init_state(B, S, x.device)
 
@@ -310,30 +368,8 @@ def load_original_trm(
     checkpoint_path = Path(checkpoint_path)
     device = torch.device(device) if isinstance(device, str) else device
 
-    # Default architecture config (matches run.sh and trm.yaml)
-    arch_config = dict(
-        hidden_size=512,
-        num_heads=8,
-        expansion=4,
-        H_cycles=3,
-        L_cycles=6,
-        H_layers=0,
-        L_layers=2,
-        pos_encodings="none",
-        forward_dtype="bfloat16",
-        mlp_t=True,
-        puzzle_emb_ndim=512,
-        puzzle_emb_len=16,
-        halt_exploration_prob=0.1,
-        halt_max_steps=16,
-        no_ACT_continue=True,
-        # Dataset constants for Sudoku
-        batch_size=64,
-        vocab_size=11,
-        seq_len=81,
-        num_puzzle_identifiers=1,
-        causal=False,
-    )
+    # Default architecture config (matches run_sudoku.sh and trm.yaml)
+    arch_config = SUDOKU_ARCH_CONFIG.copy()
 
     # Instantiate the full model (ACT wrapper included for state_dict compat)
     model = TinyRecursiveReasoningModel_ACTV1(arch_config)
@@ -370,6 +406,109 @@ def load_original_trm(
     return adapter, arch_config
 
 
+def load_arc_trm(
+    checkpoint_path: str | Path,
+    device: torch.device | str = "cpu",
+) -> tuple[nn.Module, dict[str, Any]]:
+    """Load an Original TRM checkpoint trained on ARC (attention variant).
+
+    Uses ARC_ARCH_CONFIG: mlp_t=False, pos_encodings=rope, L_cycles=4,
+    vocab_size=12 (PAD+EOS+10 colors), seq_len=900 (30x30 grid).
+
+    Returns:
+        Tuple of (OriginalTRMAdapter, config_dict).
+    """
+    import sys
+    import glob
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    trm_dir = project_root / "TinyRecursiveModels"
+    if str(trm_dir) not in sys.path:
+        sys.path.insert(0, str(trm_dir))
+    venv_sp = glob.glob(str(trm_dir / ".venv" / "lib" / "python*" / "site-packages"))
+    for sp in venv_sp:
+        if sp not in sys.path:
+            sys.path.insert(0, sp)
+
+    from models.recursive_reasoning.trm import TinyRecursiveReasoningModel_ACTV1
+
+    checkpoint_path = Path(checkpoint_path)
+    device = torch.device(device) if isinstance(device, str) else device
+
+    arch_config = ARC_ARCH_CONFIG.copy()
+
+    raw_sd = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if isinstance(raw_sd, dict) and "model_state_dict" in raw_sd:
+        raw_sd = raw_sd["model_state_dict"]
+
+    # Extract dynamic num_puzzle_identifiers
+    for k, v in raw_sd.items():
+        if k.endswith("inner.puzzle_emb.weights"):
+            arch_config["num_puzzle_identifiers"] = v.shape[0]
+            break
+
+    model = TinyRecursiveReasoningModel_ACTV1(arch_config)
+
+    clean_sd: dict[str, Any] = {}
+    for k, v in raw_sd.items():
+        k = k.replace("_orig_mod.", "")
+        if k.startswith("model."):
+            k = k[len("model."):]
+        clean_sd[k] = v
+
+    model.load_state_dict(clean_sd, strict=False)
+
+    puzzle_emb_len = arch_config["puzzle_emb_len"]
+    adapter = OriginalTRMAdapter(model.inner, puzzle_emb_len=puzzle_emb_len)
+    adapter.to(device)
+    adapter.eval()
+
+    num_params = sum(p.numel() for p in adapter.parameters())
+    logger.info(
+        "Loaded ARC TRM (attention): hidden=%d, params=%.1fM",
+        arch_config["hidden_size"],
+        num_params / 1e6,
+    )
+    return adapter, arch_config
+def resolve_matched_checkpoint(run_dir: str | Path, matched_budget: int) -> Path:
+    """Find the step checkpoint closest to matched_budget in run_dir.
+
+    Args:
+        run_dir: Path to the run directory (or a specific step checkpoint inside it)
+        matched_budget: The target number of updates (e.g., 19000000)
+    """
+    path = Path(run_dir)
+    # If a specific step file was passed, resolve to its parent run_dir
+    if path.is_file() and path.name.startswith("step_"):
+        path = path.parent
+    elif path.is_dir() and path.name.startswith("step_"):
+        path = path.parent
+
+    step_paths = list(path.glob("step_*"))
+    if not step_paths:
+        raise ValueError(f"No step_* checkpoints found in {path}")
+
+    best_path = None
+    min_diff = float("inf")
+    
+    for sp in step_paths:
+        try:
+            # Parse step number from name "step_12345"
+            step_num = int(sp.name.split("_")[1])
+            diff = abs(step_num - matched_budget)
+            if diff < min_diff:
+                min_diff = diff
+                best_path = sp
+        except (ValueError, IndexError):
+            continue
+
+    if best_path is None:
+        raise ValueError(f"Could not parse any valid step_* checkpoints in {path}")
+        
+    logger.info("Matched budget requested: %s. Closest step found: %s (diff: %d)",
+                matched_budget, best_path.name, min_diff)
+    return best_path
+
+
 def load_model(
     checkpoint_path: str | Path,
     model_type: str = "trm_v2",
@@ -379,18 +518,77 @@ def load_model(
 
     Args:
         checkpoint_path: Path to the checkpoint file.
-        model_type: 'trm_v2', 'original_trm', or 'transformer'.
+        model_type: 'trm_v2', 'original_trm', 'arc_trm', or 'transformer'.
         device: Device to load the model to.
 
     Returns:
         Tuple of (model, config_dict).
     """
-    if model_type == "original_trm":
+    if model_type == "arc_trm":
+        return load_arc_trm(checkpoint_path, device)
+    elif model_type == "original_trm":
         return load_original_trm(checkpoint_path, device)
     elif model_type == "transformer":
         return load_transformer(checkpoint_path, device)
     else:
         return load_trm(checkpoint_path, device)
+
+
+def get_arc_dataloader(
+    dataset_dir: str | Path,
+    num_samples: int = 500,
+    batch_size: int = 32,
+    split: str = "test",
+    seed: int = 0,
+) -> DataLoader:
+    """Create a DataLoader from a built ARC PuzzleDataset directory.
+
+    Args:
+        dataset_dir: Path to dataset root (e.g. data/arc-concept-n1000-aug2).
+        num_samples: Maximum number of examples to yield.
+        batch_size: Batch size.
+        split: 'train' or 'test'.
+        seed: Random seed.
+
+    Returns:
+        DataLoader yielding (inputs, labels) tensors with shape (B, 900).
+    """
+    import sys
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    trm_dir = project_root / "TinyRecursiveModels"
+    if str(trm_dir) not in sys.path:
+        sys.path.insert(0, str(trm_dir))
+
+    from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig
+
+    config = PuzzleDatasetConfig(
+        seed=seed,
+        dataset_paths=[str(dataset_dir)],
+        global_batch_size=batch_size,
+        test_set_mode=(split == "test"),
+        epochs_per_iter=1,
+        rank=0,
+        num_replicas=1,
+    )
+    ds = PuzzleDataset(config, split=split)
+
+    collected: list[tuple[torch.Tensor, torch.Tensor]] = []
+    total = 0
+    for _, batch, _ in ds:
+        inp = batch["inputs"]   # (B, 900)
+        lbl = batch["labels"]   # (B, 900)
+        collected.append((inp, lbl))
+        total += inp.size(0)
+        if total >= num_samples:
+            break
+
+    if not collected:
+        return DataLoader([], batch_size=batch_size)
+
+    all_inp = torch.cat([x for x, _ in collected], dim=0)[:num_samples]
+    all_lbl = torch.cat([y for _, y in collected], dim=0)[:num_samples]
+    dataset = torch.utils.data.TensorDataset(all_inp, all_lbl)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
 
 def get_test_dataloader(
@@ -400,24 +598,13 @@ def get_test_dataloader(
     seed: int = 0,
     dataset: str = "extreme",
 ) -> DataLoader:
-    """Create a test DataLoader.
-
-    Args:
-        num_samples: Number of test puzzles.
-        num_blanks: Number of blank cells per puzzle (for procedural).
-        batch_size: Batch size.
-        seed: Random seed.
-        dataset: 'extreme' for SudokuExtreme, 'procedural' for generated.
-
-    Returns:
-        DataLoader yielding (input, target) tuples.
-    """
+    """Create a Sudoku test DataLoader (unchanged)."""
     if dataset == "extreme":
         from src.data.tasks.sudoku import SudokuExtremeTask, SudokuTaskConfig
 
         config = SudokuTaskConfig(
             test_samples=num_samples,
-            train_samples=100,  # Minimal, we only need test
+            train_samples=100,
         )
         task = SudokuExtremeTask(config)
         test_ds = task.get_test_dataset()
