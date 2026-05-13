@@ -102,21 +102,6 @@ def main() -> None:
                 "causal_interventions.py", exp_args, "Exp 1"
             )
 
-        elif exp_num == 2:
-            exp_args = [
-                "--trm-ckpt-dir", ckpt_dir,
-                "--model-type", model_type,
-                "--num-samples", str(args.num_samples),
-                "--output-dir", f"{output_base}/exp2",
-            ]
-            if args.domain:
-                exp_args += ["--domain", args.domain]
-            if args.domain == "arc" and args.arc_dataset_dir:
-                exp_args += ["--arc-dataset-dir", args.arc_dataset_dir]
-            results[exp_num] = run_experiment(
-                "representation_similarity.py", exp_args, "Exp 2"
-            )
-
         elif exp_num == 3:
             exp_args = [
                 "--trm-ckpt-dir", ckpt_dir,

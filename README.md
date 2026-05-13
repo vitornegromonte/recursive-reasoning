@@ -78,7 +78,7 @@ python scripts/mi/aggregate_seeds.py \
 
 | Script | Experiment |
 |---|---|
-| `representation_similarity.py` | CKA / RSA across recursive steps |
+| `exp2_dynamics.py` | Dynamical systems analysis (Grassmann, Lyapunov, RQA, b₀) |
 | `token_mixer_dissection.py` | Weight-level analysis of token-mixer heads |
 | `circuit_discovery.py` | Activation patching & circuit localization |
 | `causal_interventions.py` | Causal tracing and intervention analysis |
@@ -97,7 +97,7 @@ recursive-reasoning/
 │   └── mi/                          # Mechanistic interpretability pipeline
 │       ├── run_all_checkpoints.py   # Orchestrator: runs all experiments
 │       ├── aggregate_seeds.py       # Aggregation across seeds + bootstrap CI
-│       ├── representation_similarity.py
+│       ├── exp2_dynamics.py
 │       ├── token_mixer_dissection.py
 │       ├── circuit_discovery.py
 │       ├── causal_interventions.py

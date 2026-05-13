@@ -61,8 +61,8 @@ run_experiments() {
 
     local EXPERIMENTS=(
         "causal_interventions.py|exp1"
+        "exp2_dynamics.py|exp2"
         "token_mixer_dissection.py|exp7"
-        "representation_similarity.py|exp2"
         "information_bottleneck.py|exp3"
         "intrinsic_dimensionality.py|exp4"
         "ood_blanks_sweep.py|exp5"
@@ -71,7 +71,7 @@ run_experiments() {
     )
 
     # Scripts that accept --domain
-    local DOMAIN_SCRIPTS="representation_similarity.py|superposition_analysis.py|token_mixer_dissection.py|circuit_discovery.py|information_bottleneck.py|intrinsic_dimensionality.py"
+    local DOMAIN_SCRIPTS="exp2_dynamics.py|superposition_analysis.py|token_mixer_dissection.py|circuit_discovery.py|information_bottleneck.py|intrinsic_dimensionality.py"
 
     for entry in "${EXPERIMENTS[@]}"; do
         IFS='|' read -r script exp_label extra_args <<< "$entry"

@@ -10,9 +10,8 @@ Output layout:
             1k.json   5k.json   10k.json
             1k_matched.json  5k_matched.json  10k_matched.json
             figure_*.pdf
-        ...
-        global_summary.json
-        tables/
+        exp3/
+            1k.json   5k.json   10k.json
 
 Usage:
     python3 scripts/mi/aggregate.py --domain sudoku --n-bootstrap 10000
@@ -67,7 +66,17 @@ METRIC_REGISTRY_SUDOKU: dict[str, list[str]] = {
         "patch_acc_z_H", "patch_acc_z_L", "baseline_acc",
         "patch_drop_z_H", "patch_drop_z_L",
     ],
-    "exp2": ["trm.mean_cka"],
+    "exp2": [
+        "metrics.grassmann_distance_adjacent_mean",
+        "metrics.grassmann_distance_early_late",
+        "metrics.lyapunov_max",
+        "metrics.rqa_recurrence_rate",
+        "metrics.rqa_determinism",
+        "metrics.rqa_laminarity",
+        "metrics.rqa_max_diag",
+        "metrics.b0_at_final_step",
+        "metrics.attractor_formation_step",
+    ],
     "exp3": [],  # derived below
     "exp4": [],  # derived below
     "exp5": ["accuracy", "mean_accuracy", "ood_accuracy"],
@@ -93,7 +102,17 @@ METRIC_REGISTRY_SUDOKU: dict[str, list[str]] = {
 }
 
 METRIC_REGISTRY_ARC: dict[str, list[str]] = {
-    "exp2": ["trm.mean_cka"],
+    "exp2": [
+        "metrics.grassmann_distance_adjacent_mean",
+        "metrics.grassmann_distance_early_late",
+        "metrics.lyapunov_max",
+        "metrics.rqa_recurrence_rate",
+        "metrics.rqa_determinism",
+        "metrics.rqa_laminarity",
+        "metrics.rqa_max_diag",
+        "metrics.b0_at_final_step",
+        "metrics.attractor_formation_step",
+    ],
     "exp3": [],
     "exp4": [],
     "exp6": ["mean_polysemanticity", "mean_hoyer", "mean_kurtosis", "feature_polysemanticity"],
