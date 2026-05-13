@@ -19,22 +19,14 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-import matplotlib.pyplot as plt
 import numpy as np
-import torch
+
+try:
+    import torch
+except ImportError:
+    torch = None  # torch only needed for Lyapunov + CLI; metric functions run without it
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
-from scripts.mi.shared.model_loader import (
-    get_device,
-    get_test_dataloader,
-    get_arc_dataloader,
-    load_model,
-    resolve_matched_checkpoint,
-)
-from scripts.mi.shared.multi_checkpoint import discover_checkpoints
-from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, save_json, set_paper_style
-from scripts.mi.shared.trajectory_utils import collect_trm_dual_trajectories
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -91,8 +83,15 @@ def compute_grassmann_distances(
         d = float(np.sqrt(np.sum(angles**2)))
         distances.append(d)
 
-    # Early-late distance
-    d_early_late = distances[T - 2] if T >= 2 else 0.0
+    # Early-late distance: bases[0] vs bases[-1]
+    if T >= 2:
+        M_el = bases[0].T @ bases[-1]
+        _, S_el, _ = np.linalg.svd(M_el, full_matrices=False)
+        S_el = np.clip(S_el, -1.0, 1.0)
+        angles_el = np.arccos(S_el)
+        d_early_late = float(np.sqrt(np.sum(angles_el**2)))
+    else:
+        d_early_late = 0.0
 
     return {
         "grassmann_distance_adjacent_mean": float(np.mean(distances)) if distances else 0.0,
@@ -105,7 +104,12 @@ def compute_grassmann_distances(
 # Metric 2: Local Lyapunov exponents
 # ---------------------------------------------------------------------------
 
-@torch.no_grad()
+if torch is not None:
+    _no_grad = torch.no_grad()
+else:
+    _no_grad = lambda f: f
+
+@_no_grad
 def _collect_perturbed_trajectory(
     model: torch.nn.Module,
     dataloader: torch.utils.data.DataLoader,
@@ -119,6 +123,7 @@ def _collect_perturbed_trajectory(
 
     Returns z_H_pert array of shape (max_samples, T, num_cells, hidden).
     """
+    import torch
     model.eval()
     rng = torch.Generator(device=device).manual_seed(seed)
 
@@ -231,14 +236,29 @@ def compute_rqa(
 
     RR = float(R.sum() / (T * T))
 
-    def _line_histogram(mat: np.ndarray, axis: int = 0) -> list[int]:
-        """Return histogram of consecutive-1 line lengths along axis."""
-        if axis == 1:
-            mat = mat.T
+    def _diagonal_lengths(mat: np.ndarray) -> list[int]:
+        """Return histogram of consecutive-1 lengths along true diagonals (j-i=const)."""
         lengths = []
-        for i in range(mat.shape[0]):
+        for offset in range(-T + 1, T):
+            diag = np.diag(mat, offset)
             run = 0
-            for j in range(mat.shape[1]):
+            for v in diag:
+                if v > 0.5:
+                    run += 1
+                else:
+                    if run > 0:
+                        lengths.append(run)
+                    run = 0
+            if run > 0:
+                lengths.append(run)
+        return lengths
+
+    def _vertical_lengths(mat: np.ndarray) -> list[int]:
+        """Return histogram of consecutive-1 lengths along columns."""
+        lengths = []
+        for j in range(T):
+            run = 0
+            for i in range(T):
                 if mat[i, j] > 0.5:
                     run += 1
                 else:
@@ -249,8 +269,8 @@ def compute_rqa(
                 lengths.append(run)
         return lengths
 
-    diag_lengths = _line_histogram(R, axis=0)
-    vert_lengths = _line_histogram(R, axis=1)
+    diag_lengths = _diagonal_lengths(R)
+    vert_lengths = _vertical_lengths(R)
 
     def _ratio(lengths: list[int]) -> tuple[float, int]:
         total = sum(lengths)
@@ -278,25 +298,26 @@ def compute_rqa(
 def compute_b0_persistence(
     z_H: np.ndarray,
     step_subsample: int = 4,
-    max_edge_length: float | None = None,
 ) -> dict[str, Any]:
     """Compute b0 (number of connected components) at each recursion step.
 
-    Uses a thresholded distance graph: connect two points if their
-    Euclidean distance < threshold, then count connected components
-    via scipy.sparse.csgraph. Default threshold = median pairwise
-    distance at step 0.
+    Builds the Minimum Spanning Tree of the point cloud and finds the
+    threshold corresponding to the largest gap in the MST edge-length
+    distribution. Edges shorter than this threshold form the natural
+    clusters; longer edges are bridges between clusters.
+
+    This is equivalent to finding the most-persistent barcode gap in
+    the 0-dimensional persistence diagram of the Vietoris-Rips complex,
+    without needing gudhi.
 
     Args:
         z_H: Latent states (N, T, num_cells, hidden).
         step_subsample: Only compute b0 every N steps (for speed).
-        max_edge_length: Distance threshold for graph edges. If None,
-            auto-computed as median pairwise distance at step 0.
 
     Returns:
         Dict with b0_at_final_step, b0_trajectory, attractor_formation_step.
     """
-    from scipy.sparse.csgraph import connected_components
+    from scipy.sparse.csgraph import connected_components, minimum_spanning_tree
     from sklearn.metrics import pairwise_distances
 
     N, T, C, H = z_H.shape
@@ -304,17 +325,29 @@ def compute_b0_persistence(
     if step_indices[-1] != T - 1:
         step_indices.append(T - 1)
 
-    if max_edge_length is None:
-        sample_points = z_H[:, 0].reshape(N * C, H)
-        sample_dists = pairwise_distances(sample_points[:min(200, N * C)])
-        max_edge_length = float(np.median(sample_dists[sample_dists > 0]))
-
     b0_vals: list[float] = []
 
     for t in step_indices:
         points = z_H[:, t].reshape(N * C, H)
         D = pairwise_distances(points)
-        adj = (D < max_edge_length).astype(np.float64)
+        mst = minimum_spanning_tree(D).toarray()
+        mst_edges = np.sort(mst[mst > 0])
+
+        if len(mst_edges) < 2:
+            eps = 1.0
+        else:
+            gaps = np.diff(mst_edges)
+            max_gap = gaps.max()
+            median_edge = float(np.median(mst_edges))
+            # Only trust the gap if it's a significant fraction of the median edge
+            if max_gap < median_edge * 0.1:
+                n_components = 1
+                b0_vals.append(float(n_components))
+                continue
+            largest_gap_idx = int(np.argmax(gaps))
+            eps = float(mst_edges[largest_gap_idx])
+
+        adj = (D <= eps).astype(np.float64)
         np.fill_diagonal(adj, 1)
         n_components, _ = connected_components(adj, directed=False)
         b0_vals.append(float(n_components))
@@ -362,6 +395,12 @@ def run_single(
 
     Returns dict with all four metric groups plus config.
     """
+    import torch
+
+    from scripts.mi.shared.model_loader import load_model, get_test_dataloader, get_arc_dataloader
+    from scripts.mi.shared.trajectory_utils import collect_trm_dual_trajectories
+    from scripts.mi.shared.plotting import save_json
+
     model, config = load_model(ckpt_path, model_type, device)
 
     if domain == "arc":
@@ -435,6 +474,9 @@ def run_single(
 
 def _plot_all_metrics(metrics: dict, output_dir: str | Path) -> None:
     """Plot per-checkpoint metrics for diagnostic purposes."""
+    import matplotlib.pyplot as plt
+    from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, set_paper_style
+
     set_paper_style()
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -491,6 +533,9 @@ def plot_global_dynamics(
     output_dir: str | Path,
 ) -> None:
     """Plot mean ± std dynamics metrics across checkpoints."""
+    import matplotlib.pyplot as plt
+    from scripts.mi.shared.plotting import COLORS, LABELS, save_figure, set_paper_style
+
     set_paper_style()
 
     metrics_list = [r["metrics"] for r in all_results]
@@ -577,6 +622,11 @@ def plot_global_dynamics(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    import torch
+    from scripts.mi.shared.model_loader import get_device, resolve_matched_checkpoint
+    from scripts.mi.shared.multi_checkpoint import discover_checkpoints
+    from scripts.mi.shared.plotting import save_json
+
     parser = argparse.ArgumentParser(
         description="Dynamical systems analysis of TRM latent trajectories"
     )
