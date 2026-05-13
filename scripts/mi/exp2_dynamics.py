@@ -68,9 +68,15 @@ def compute_grassmann_distances(
     for t in range(T):
         X = z_H[:, t].reshape(N * C, H)
         X = X - X.mean(axis=0, keepdims=True)
-        Q, _ = np.linalg.qr(X, mode="reduced")
-        r = min(GRASSMANN_RANK, Q.shape[1])
-        Q = Q[:, :r]
+        var = np.var(X)
+        if var < 1e-12:
+            r = 1
+            Q = np.zeros((N * C, 1))
+            Q[0, 0] = 1.0
+        else:
+            Q, _ = np.linalg.qr(X, mode="reduced")
+            r = min(GRASSMANN_RANK, Q.shape[1])
+            Q = Q[:, :r]
         bases.append(Q)
 
     # Compute Grassmann distance between consecutive steps
@@ -161,17 +167,20 @@ def compute_lyapunov_exponents(
     N = min(z_H_ref.shape[0], z_H_pert.shape[0])
     T = z_H_ref.shape[1]
 
-    # Per-step L2 distance averaged over batch and spatial
-    d = np.linalg.norm(z_H_ref[:N] - z_H_pert[:N], axis=(-2, -1))  # (N, T)
-    d_mean = d.mean(axis=0)  # (T,)
+    # Per-step L2 distance over spatial dims, per sample  (N, T)
+    d = np.linalg.norm(z_H_ref[:N] - z_H_pert[:N], axis=-1)  # (N, T, C) → mean over C
+    d = d.mean(axis=-1)  # (N, T)
 
-    # Local Lyapunov exponent per step
-    lyapunov_traj = []
-    for t in range(1, T):
-        lam = np.log(max(d_mean[t], 1e-12) / max(d_mean[t - 1], 1e-12))
-        lyapunov_traj.append(float(lam))
+    # Log ratio per sample, then average
+    lyapunov_per_sample = np.zeros((N, T - 1))
+    for n in range(N):
+        for t in range(1, T):
+            lyapunov_per_sample[n, t - 1] = np.log(
+                max(d[n, t], 1e-12) / max(d[n, t - 1], 1e-12)
+            )
 
-    # Max exponent = mean over final half of trajectory
+    lyapunov_traj = lyapunov_per_sample.mean(axis=0).tolist()  # (T-1,)
+
     half = len(lyapunov_traj) // 2
     lyapunov_max = float(np.mean(lyapunov_traj[half:])) if lyapunov_traj else 0.0
     lyapunov_std = float(np.std(lyapunov_traj[half:])) if lyapunov_traj else 0.0
@@ -206,9 +215,12 @@ def compute_rqa(
 
     z_pooled = z_H.transpose(1, 0, 2, 3).reshape(T, N * C * H)  # (T, N*C*H)
 
+    from sklearn.preprocessing import StandardScaler
     from sklearn.decomposition import PCA
-    pca = PCA(n_components=min(pca_dims, T, N * C * H))
-    z_pca = pca.fit_transform(z_pooled)  # (T, n_components)
+
+    z_scaled = StandardScaler().fit_transform(z_pooled)
+    n_comp = min(pca_dims, T, z_scaled.shape[1])
+    z_pca = PCA(n_components=n_comp).fit_transform(z_scaled)  # (T, n_comp)
 
     from sklearn.metrics import pairwise_distances
     D = pairwise_distances(z_pca, metric="euclidean")  # (T, T)
@@ -266,28 +278,36 @@ def compute_rqa(
 def compute_b0_persistence(
     z_H: np.ndarray,
     step_subsample: int = 4,
-    max_edge_length: float = 50.0,
+    max_edge_length: float | None = None,
 ) -> dict[str, Any]:
     """Compute b0 (number of connected components) at each recursion step.
 
-    Uses gudhi's Vietoris-Rips complex and extracts the 0-dimensional
-    persistence diagram. Returns b0 at final step, trajectory, and the step
-    where the first persistent component forms.
+    Uses a thresholded distance graph: connect two points if their
+    Euclidean distance < threshold, then count connected components
+    via scipy.sparse.csgraph. Default threshold = median pairwise
+    distance at step 0.
 
     Args:
         z_H: Latent states (N, T, num_cells, hidden).
         step_subsample: Only compute b0 every N steps (for speed).
-        max_edge_length: Maximum edge length for VR complex.
+        max_edge_length: Distance threshold for graph edges. If None,
+            auto-computed as median pairwise distance at step 0.
 
     Returns:
         Dict with b0_at_final_step, b0_trajectory, attractor_formation_step.
     """
-    import gudhi as gd
+    from scipy.sparse.csgraph import connected_components
+    from sklearn.metrics import pairwise_distances
 
     N, T, C, H = z_H.shape
     step_indices = list(range(0, T, step_subsample))
     if step_indices[-1] != T - 1:
         step_indices.append(T - 1)
+
+    if max_edge_length is None:
+        sample_points = z_H[:, 0].reshape(N * C, H)
+        sample_dists = pairwise_distances(sample_points[:min(200, N * C)])
+        max_edge_length = float(np.median(sample_dists[sample_dists > 0]))
 
     b0_vals: list[float] = []
 
@@ -296,16 +316,11 @@ def compute_b0_persistence(
 
         rips = gd.RipsComplex(points=points, max_edge_length=max_edge_length)
         simplex_tree = rips.create_simplex_tree(max_dimension=1)
-        simplex_tree.compute_persistence()
+        diag = simplex_tree.persistence(min_persistence=0.0)
 
-        # Count 0-dimensional bars that persist beyond a small epsilon
-        eps = 1e-6
-        b0 = 0
-        for interval in simplex_tree.persistence_intervals_in_dimension(0):
-            death = interval[1]
-            if death == float("inf") or death > eps:
-                b0 += 1
-        b0_vals.append(float(b0))
+        bars_0 = [d for d in diag if d[0] == 0]
+        pers_bars = [d[1] for _, d in bars_0 if d[1][1] != float("inf")]
+        b0_vals.append(float(len(pers_bars)))
 
     # Interpolate to full step range
     b0_trajectory = np.interp(
