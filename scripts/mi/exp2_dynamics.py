@@ -313,14 +313,11 @@ def compute_b0_persistence(
 
     for t in step_indices:
         points = z_H[:, t].reshape(N * C, H)
-
-        rips = gd.RipsComplex(points=points, max_edge_length=max_edge_length)
-        simplex_tree = rips.create_simplex_tree(max_dimension=1)
-        diag = simplex_tree.persistence(min_persistence=0.0)
-
-        bars_0 = [d for d in diag if d[0] == 0]
-        pers_bars = [d[1] for _, d in bars_0 if d[1][1] != float("inf")]
-        b0_vals.append(float(len(pers_bars)))
+        D = pairwise_distances(points)
+        adj = (D < max_edge_length).astype(np.float64)
+        np.fill_diagonal(adj, 1)
+        n_components, _ = connected_components(adj, directed=False)
+        b0_vals.append(float(n_components))
 
     # Interpolate to full step range
     b0_trajectory = np.interp(
