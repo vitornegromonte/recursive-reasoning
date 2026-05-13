@@ -21,12 +21,13 @@ def collect_trm_dual_trajectories(
     T: int = 42,
     max_samples: int | None = None,
 ) -> dict[str, Any]:
-    """Collect z_H and z_L trajectories from a SudokuTRMv2 model.
+    """Collect z_H and z_L trajectories from a TRM model.
 
     Unlike src/trajectories.collect_trm_trajectories, this:
     - Collects BOTH z_H and z_L per step (not just y)
     - Returns per-step predictions for causal analysis
     - Works with SudokuTRMv2 (sequence-shaped states)
+    - Domain-agnostic: seq_len is inferred from model embedding
 
     Args:
         model: SudokuTRMv2 model (eval mode).
@@ -37,12 +38,12 @@ def collect_trm_dual_trajectories(
 
     Returns:
         Dictionary with:
-        - 'z_H': tensor (N, T, 81, hidden) — answer states per step
-        - 'z_L': tensor (N, T, 81, hidden) — latent states per step
-        - 'preds_per_step': tensor (N, T, 81) — predicted digits per step
-        - 'inputs': tensor (N, 81, 10) — one-hot puzzle inputs
-        - 'targets': tensor (N, 81) — target digits
-        - 'final_preds': tensor (N, 81) — final step predictions
+        - 'z_H': tensor (N, T, num_cells, hidden) — answer states per step
+        - 'z_L': tensor (N, T, num_cells, hidden) — latent states per step
+        - 'preds_per_step': tensor (N, T, num_cells) — predicted digits per step
+        - 'inputs': tensor (N, num_cells, vocab_size) — one-hot puzzle inputs
+        - 'targets': tensor (N, num_cells) — target digits
+        - 'final_preds': tensor (N, num_cells) — final step predictions
     """
     model.eval()
 
@@ -119,7 +120,7 @@ def collect_trm_dual_trajectories(
             preds = logits.argmax(dim=-1)
             batch_preds.append(preds.cpu())
 
-        # Stack to (batch, T, 81, hidden) and (batch, T, 81)
+        # Stack to (batch, T, num_cells, hidden) and (batch, T, num_cells)
         batch_z_H_t = torch.stack(batch_z_H, dim=1)
         batch_z_H_pre_norm_t = torch.stack(batch_z_H_pre_norm, dim=1)
         batch_z_L_t = torch.stack(batch_z_L, dim=1)
@@ -181,10 +182,10 @@ def collect_transformer_layer_trajectories(
 
     Returns:
         Dictionary with:
-        - 'h_traj': tensor (N, L, 81, d_model) — hidden states per layer
-        - 'inputs': tensor (N, 81, 10) — one-hot puzzle inputs
-        - 'targets': tensor (N, 81) — target digits
-        - 'predictions': tensor (N, 81) — final predictions
+        - 'h_traj': tensor (N, L, num_cells, d_model) — hidden states per layer
+        - 'inputs': tensor (N, num_cells, vocab_size) — one-hot puzzle inputs
+        - 'targets': tensor (N, num_cells) — target digits
+        - 'predictions': tensor (N, num_cells) — final predictions
     """
     model.eval()
 

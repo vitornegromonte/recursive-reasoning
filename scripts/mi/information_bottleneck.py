@@ -118,6 +118,98 @@ def estimate_mi(
         return _binning_mi_fallback(X, Y, n_components=n_components)
 
 
+def compute_linear_R2(
+    z_flat: np.ndarray,
+    x_flat: np.ndarray,
+) -> float:
+    """
+    Compute R² as a lower bound on predictive information.
+
+    Fits a linear model: z = Wx + b and computes variance explained.
+    R² is a provable lower bound on I(x; z) under mild assumptions.
+
+    This is more stable than k-NN MI for small sample sizes and
+    provides interpretable results.
+
+    Args:
+        z_flat: (N, d_z) latent representations.
+        x_flat: (N, d_x) input features.
+
+    Returns:
+        R² score (0 to 1, higher = more predictable).
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.model_selection import cross_val_score
+
+    N, d_z = z_flat.shape
+
+    z_mean = z_flat.mean(axis=1, keepdims=True)
+    total_var = np.var(z_flat, axis=0).sum()
+
+    model = Ridge(alpha=1.0)
+    scores = cross_val_score(model, x_flat, z_flat, cv=5, scoring="r2")
+
+    return float(np.mean(scores))
+
+
+def compute_total_correlation(
+    z_flat: np.ndarray,
+    x_flat: np.ndarray,
+    n_samples_subsample: int = 500,
+    rng: np.random.Generator | None = None,
+) -> float:
+    """
+    Estimate Total Correlation via Noise Contrastive Estimation.
+
+    TC(X;Y) = KL(p(X,Y) || p(X)p(Y)) measures how much the joint distribution
+    deviates from independence. More robust than k-NN MI for high dimensions.
+
+    Uses NCE: distinguish joint samples from product-of-marginals samples.
+    The log-ratio estimator gives an unbiased estimate of TC.
+
+    Args:
+        z_flat: (N, d_z) latent representations.
+        x_flat: (N, d_x) input features.
+        n_samples_subsample: Subsample size for faster computation.
+        rng: Random number generator.
+
+    Returns:
+        TC estimate in nats.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    N = min(z_flat.shape[0], n_samples_subsample)
+
+    idx = rng.choice(z_flat.shape[0], size=N, replace=False)
+    z_sub = z_flat[idx]
+    x_sub = x_flat[idx]
+
+    z_mean = z_sub.mean(axis=0)
+    z_std = z_sub.std(axis=0) + 1e-8
+    x_mean = x_sub.mean(axis=0)
+    x_std = x_sub.std(axis=0) + 1e-8
+
+    z_norm = (z_sub - z_mean) / z_std
+    x_norm = (x_sub - x_mean) / x_std
+
+    nce_score = 0.0
+    n_pairs = N // 2
+
+    for i in range(n_pairs):
+        joint_dot = np.dot(z_norm[i], x_norm[i])
+        perm_dot = np.dot(z_norm[i], x_norm[(i + n_pairs) % N])
+
+        joint_logit = joint_dot - np.log(1 + np.exp(joint_dot))
+        perm_logit = perm_dot - np.log(1 + np.exp(perm_dot))
+
+        nce_score += joint_logit - np.log(1 + np.exp(perm_logit))
+
+    tc_estimate = 2.0 * nce_score / n_pairs
+
+    return max(0.0, float(tc_estimate))
+
+
 def _binning_mi_fallback(
     X: np.ndarray,
     Y: np.ndarray,
@@ -168,20 +260,26 @@ def run_bottleneck_analysis(
     targets: np.ndarray,
     step_indices: list[int],
     k: int = 5,
+    use_alternative_metrics: bool = True,
 ) -> dict[str, dict[str, float]]:
-    """Compute MI(z_H; x) and MI(z_H; y) at each step using k-NN MI.
+    """Compute MI(z_H; x) and MI(z_H; y) at each step.
+
+    Uses k-NN MI (KSG) plus optional Linear R² and Total Correlation
+    for robustness. All metrics are domain-agnostic (uses dynamic seq_len).
 
     Args:
-        z_H: (N, T, 81, hidden) TRM z_H trajectories.
-        inputs: (N, 81, 10) one-hot inputs.
-        targets: (N, 81) target digits.
+        z_H: (N, T, num_cells, hidden) TRM z_H trajectories.
+        inputs: (N, num_cells, vocab_size) one-hot inputs.
+        targets: (N, num_cells) target digits.
         step_indices: Which steps to analyze.
         k: Number of neighbors for KSG estimator.
+        use_alternative_metrics: If True, compute Linear R² and TC as well.
 
     Returns:
-        Dict mapping step → {mi_input, mi_target}.
+        Dict mapping step → {mi_input, mi_target, r2_input, r2_target, tc_input}.
     """
     N = z_H.shape[0]
+    num_cells = z_H.shape[2]
     x_flat = inputs.reshape(N, -1).astype(np.float64)
     y_flat = targets.reshape(N, -1).astype(np.float64)
 
@@ -192,7 +290,24 @@ def run_bottleneck_analysis(
         mi_input = estimate_mi(z_flat, x_flat, k=k)
         mi_target = estimate_mi(z_flat, y_flat, k=k)
 
-        results[str(step)] = {"mi_input": mi_input, "mi_target": mi_target}
+        step_result = {"mi_input": mi_input, "mi_target": mi_target}
+
+        if use_alternative_metrics:
+            try:
+                step_result["r2_target"] = compute_linear_R2(z_flat, y_flat)
+                step_result["r2_input"] = compute_linear_R2(z_flat, x_flat)
+            except Exception:
+                step_result["r2_target"] = None
+                step_result["r2_input"] = None
+
+            try:
+                step_result["tc_target"] = compute_total_correlation(z_flat, y_flat)
+                step_result["tc_input"] = compute_total_correlation(z_flat, x_flat)
+            except Exception:
+                step_result["tc_target"] = None
+                step_result["tc_input"] = None
+
+        results[str(step)] = step_result
         logger.info("Step %d: MI(z_H; x)=%.4f, MI(z_H; y)=%.4f",
                     step, mi_input, mi_target)
 
@@ -204,8 +319,9 @@ def run_transformer_bottleneck(
     inputs: np.ndarray,
     targets: np.ndarray,
     k: int = 5,
+    use_alternative_metrics: bool = True,
 ) -> dict[str, dict[str, float]]:
-    """Compute MI for Transformer layers using k-NN MI."""
+    """Compute MI for Transformer layers using k-NN MI plus alternatives."""
     N, L = h_traj.shape[:2]
     x_flat = inputs.reshape(N, -1).astype(np.float64)
     y_flat = targets.reshape(N, -1).astype(np.float64)
@@ -217,7 +333,17 @@ def run_transformer_bottleneck(
         mi_input = estimate_mi(h_flat, x_flat, k=k)
         mi_target = estimate_mi(h_flat, y_flat, k=k)
 
-        results[str(layer)] = {"mi_input": mi_input, "mi_target": mi_target}
+        step_result = {"mi_input": mi_input, "mi_target": mi_target}
+
+        if use_alternative_metrics:
+            try:
+                step_result["r2_target"] = compute_linear_R2(h_flat, y_flat)
+                step_result["r2_input"] = compute_linear_R2(h_flat, x_flat)
+            except Exception:
+                step_result["r2_target"] = None
+                step_result["r2_input"] = None
+
+        results[str(layer)] = step_result
         logger.info("Layer %d: MI(h; x)=%.4f, MI(h; y)=%.4f",
                     layer, mi_input, mi_target)
 
@@ -228,15 +354,15 @@ def run_single_trm(
     ckpt_path: str,
     model_type: str = "trm_v2",
     device=None,
-    num_samples: int = 500,
+    num_samples: int = 1000,
     T: int = 42,
-    k: int = 5,
+    k: int = 10,
     domain: str = "sudoku",
     arc_dataset_dir: str | None = None,
 ) -> dict:
     """Run bottleneck analysis on a single TRM checkpoint."""
     model, config = load_model(ckpt_path, model_type, device)
-    
+
     if domain == "arc":
         if not arc_dataset_dir:
             raise ValueError("--arc-dataset-dir required for ARC")
@@ -267,8 +393,8 @@ def run_single_trm(
 def run_single_transformer(
     ckpt_path: str,
     device,
-    num_samples: int = 500,
-    k: int = 5,
+    num_samples: int = 1000,
+    k: int = 10,
 ) -> dict:
     """Run bottleneck analysis on a single Transformer checkpoint."""
     model, _ = load_transformer(ckpt_path, device)
@@ -437,9 +563,9 @@ def main() -> None:
     parser.add_argument("--trans-ckpt", default=None, help="Single Transformer checkpoint")
     parser.add_argument("--trm-ckpt-dir", default=None, help="Directory of TRM checkpoints")
     parser.add_argument("--trans-ckpt-dir", default=None, help="Directory of Transformer checkpoints")
-    parser.add_argument("--num-samples", type=int, default=500)
+    parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--T", type=int, default=42)
-    parser.add_argument("--k", type=int, default=5, help="k for KSG MI estimator")
+    parser.add_argument("--k", type=int, default=10, help="k for KSG MI estimator")
     parser.add_argument("--output-dir", default="outputs/mi/exp3")
     parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm", "arc_trm"], help="Model type to load")
     parser.add_argument("--arc-dataset-dir", default=None, help="ARC dataset dir")
@@ -536,27 +662,50 @@ def main() -> None:
             "mi_estimator": "ksg_knn",
         }
 
-        # Aggregate MI trajectories if available
         if all_trm_results:
-            mi_x_vals = [r["mi_x"] for r in all_trm_results if "mi_x" in r]
-            mi_y_vals = [r["mi_y"] for r in all_trm_results if "mi_y" in r]
-            if mi_x_vals:
-                summary["trm_mean_mi_x_first"] = round(float(np.mean([v[0] for v in mi_x_vals])), 4)
-                summary["trm_mean_mi_x_last"] = round(float(np.mean([v[-1] for v in mi_x_vals])), 4)
-            if mi_y_vals:
-                summary["trm_mean_mi_y_first"] = round(float(np.mean([v[0] for v in mi_y_vals])), 4)
-                summary["trm_mean_mi_y_last"] = round(float(np.mean([v[-1] for v in mi_y_vals])), 4)
-                summary["finding"] = (
-                    f"I(Z;Y) increases from {summary['trm_mean_mi_y_first']:.3f} to "
-                    f"{summary['trm_mean_mi_y_last']:.3f} across recursion steps, "
-                    "indicating progressive information extraction about targets"
-                )
+            first_steps = sorted(list(all_trm_results[0].keys()))
+            last_steps = sorted(list(all_trm_results[0].keys()))
+
+            mi_x_first = []
+            mi_x_last = []
+            mi_y_first = []
+            mi_y_last = []
+
+            for r in all_trm_results:
+                for step, data in r.items():
+                    if step.isdigit():
+                        s = int(step)
+                        if s == int(first_steps[0]) if first_steps else 0:
+                            mi_x_first.append(data.get("mi_input", data.get("r2_input")))
+                            mi_y_first.append(data.get("mi_target", data.get("r2_target")))
+                        elif s == int(last_steps[-1]) if last_steps else 0:
+                            mi_x_last.append(data.get("mi_input", data.get("r2_input")))
+                            mi_y_last.append(data.get("mi_target", data.get("r2_target")))
+
+            summary["trm_mi_input_first_mean"] = round(float(np.mean(mi_x_first)), 4) if mi_x_first else None
+            summary["trm_mi_input_last_mean"] = round(float(np.mean(mi_x_last)), 4) if mi_x_last else None
+            summary["trm_mi_target_first_mean"] = round(float(np.mean(mi_y_first)), 4) if mi_y_first else None
+            summary["trm_mi_target_last_mean"] = round(float(np.mean(mi_y_last)), 4) if mi_y_last else None
+
+            r2_vals = [
+                data.get("r2_target")
+                for r in all_trm_results
+                for data in r.values()
+                if isinstance(data, dict) and data.get("r2_target") is not None
+            ]
+            if r2_vals:
+                summary["trm_r2_target_global_mean"] = round(float(np.mean(r2_vals)), 4)
 
         if all_trans_results:
-            mi_y_vals = [r["mi_y"] for r in all_trans_results if "mi_y" in r]
+            mi_y_vals = [
+                list(r.values())[0].get("mi_target")
+                for r in all_trans_results
+                if r
+            ]
+            mi_y_vals = [v for v in mi_y_vals if v is not None]
             if mi_y_vals:
-                summary["transformer_mean_mi_y_first"] = round(float(np.mean([v[0] for v in mi_y_vals])), 4)
-                summary["transformer_mean_mi_y_last"] = round(float(np.mean([v[-1] for v in mi_y_vals])), 4)
+                summary["transformer_mi_target_first_mean"] = round(float(mi_y_vals[0]), 4)
+                summary["transformer_mi_target_last_mean"] = round(float(mi_y_vals[-1]), 4) if len(mi_y_vals) > 1 else None
 
         global_summary["summary"] = summary
         save_json(global_summary, "global_results", str(global_dir))

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Sudoku MLP-T TRM (matches run_sudoku.sh)
+# seq_len is dynamically determined from domain, not hardcoded here
 SUDOKU_ARCH_CONFIG = dict(
     hidden_size=512,
     num_heads=8,
@@ -39,12 +40,15 @@ SUDOKU_ARCH_CONFIG = dict(
     no_ACT_continue=True,
     batch_size=64,
     vocab_size=11,       # PAD + digits 1-9 + blank
-    seq_len=81,
+    num_cells=81,       # 9x9 grid
+    num_digits=9,
+    cell_dim=10,
     num_puzzle_identifiers=1,
     causal=False,
 )
 
 # ARC attention TRM (matches run_arc.sh)
+# Variable grid sizes supported - seq_len determined at runtime from model
 ARC_ARCH_CONFIG = dict(
     hidden_size=512,
     num_heads=8,
@@ -63,10 +67,59 @@ ARC_ARCH_CONFIG = dict(
     no_ACT_continue=True,
     batch_size=128,
     vocab_size=12,       # PAD + EOS + 10 colors
-    seq_len=900,         # 30x30 grid
     num_puzzle_identifiers=481,
     causal=False,
 )
+
+
+def _extract_num_cells_from_state_dict(state_dict: dict, default: int = 81) -> int:
+    """
+    Infer num_cells from state dict keys.
+
+    Looks for weight matrices whose shape reveals the grid size.
+    """
+    patterns = [
+        ("embed.weight", 1),
+        ("trm_net", 2),
+        ("output_head.weight", 0),
+        ("H_init", 1),
+        ("L_init", 1),
+    ]
+
+    for key, dim in patterns:
+        for sd_key, tensor in state_dict.items():
+            if key in sd_key and hasattr(tensor, "shape") and len(tensor.shape) > dim:
+                shape = tensor.shape[dim]
+                if shape > 10:
+                    return shape
+
+    return default
+
+
+def get_model_seq_len(model: nn.Module) -> int:
+    """
+    Get the sequence length (num_cells) from a loaded model.
+
+    Args:
+        model: A TRM or Transformer model.
+
+    Returns:
+        Number of spatial positions (cells) in the grid.
+    """
+    if hasattr(model, "num_cells"):
+        return model.num_cells
+    elif hasattr(model, "grid_size"):
+        return model.grid_size
+    elif hasattr(model, "inner"):
+        if hasattr(model.inner, "num_cells"):
+            return model.inner.num_cells
+        if hasattr(model.inner, "config"):
+            return model.inner.config.get("num_cells", 81)
+    elif hasattr(model, "trm_net") and hasattr(model.trm_net, "num_cells"):
+        return model.trm_net.num_cells
+
+    logger.warning("Could not determine seq_len from model, defaulting to 81")
+    return 81
 
 
 def _resolve_config(checkpoint_path: Path) -> dict[str, Any]:
@@ -123,7 +176,7 @@ def load_trm(
         device: Device to load the model to.
 
     Returns:
-        Tuple of (model, config_dict).
+        Tuple of (model, config_dict) where config includes seq_len and num_cells.
     """
     from src.models.trm import SudokuTRMv2
 
@@ -133,14 +186,17 @@ def load_trm(
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    # Resolve constructor args from config
+    num_cells = config.get("num_cells", 81)
+    num_digits = config.get("num_digits", 9)
+    cell_dim = config.get("cell_dim", num_digits + 1)
+
     model_kwargs: dict[str, Any] = {
         "hidden_size": config.get("model_dim", 630),
         "num_heads": config.get("n_heads", 9),
         "num_layers": 2,
-        "cell_dim": 10,
-        "num_cells": 81,
-        "num_digits": 9,
+        "cell_dim": cell_dim,
+        "num_cells": num_cells,
+        "num_digits": num_digits,
         "mlp_t": True,
     }
 
@@ -150,9 +206,13 @@ def load_trm(
     model.to(device)
     model.eval()
 
+    config["seq_len"] = num_cells
+    config["num_cells"] = num_cells
+
     logger.info(
-        "Loaded TRMv2: hidden=%d, params=%.1fM",
+        "Loaded TRMv2: hidden=%d, num_cells=%d, params=%.1fM",
         model_kwargs["hidden_size"],
+        num_cells,
         sum(p.numel() for p in model.parameters()) / 1e6,
     )
     return model, config
@@ -169,7 +229,7 @@ def load_transformer(
         device: Device to load the model to.
 
     Returns:
-        Tuple of (model, config_dict).
+        Tuple of (model, config_dict) where config includes seq_len and grid_size.
     """
     from src.models.transformer import SudokuTransformer
 
@@ -179,14 +239,18 @@ def load_transformer(
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
+    num_cells = config.get("num_cells", config.get("grid_size", 81))
+    num_digits = config.get("num_digits", 9)
+    cell_vocab_size = num_digits + 1
+
     model_kwargs: dict[str, Any] = {
         "d_model": config.get("model_dim", 288),
         "n_heads": config.get("n_heads", 4),
         "d_ff": 512,
         "depth": config.get("depth", 8),
-        "cell_vocab_size": 10,
-        "grid_size": 81,
-        "num_digits": 9,
+        "cell_vocab_size": cell_vocab_size,
+        "grid_size": num_cells,
+        "num_digits": num_digits,
         "dropout": 0.0,  # No dropout at eval time
     }
 
@@ -196,9 +260,13 @@ def load_transformer(
     model.to(device)
     model.eval()
 
+    config["seq_len"] = num_cells
+    config["grid_size"] = num_cells
+
     logger.info(
-        "Loaded Transformer: d_model=%d, depth=%d, params=%.1fM",
+        "Loaded Transformer: d_model=%d, grid_size=%d, depth=%d, params=%.1fM",
         model_kwargs["d_model"],
+        num_cells,
         model_kwargs["depth"],
         sum(p.numel() for p in model.parameters()) / 1e6,
     )
@@ -388,6 +456,13 @@ def load_original_trm(
             k = k[len("model."):]
         clean_sd[k] = v
 
+    # Extract num_cells from loaded model weights
+    num_cells = _extract_num_cells_from_state_dict(clean_sd, default=81)
+    arch_config["num_cells"] = num_cells
+    arch_config["seq_len"] = num_cells
+    arch_config["num_digits"] = 9
+    arch_config["cell_dim"] = 10
+
     model.load_state_dict(clean_sd, strict=False)
 
     # Wrap inner model in adapter
@@ -398,8 +473,9 @@ def load_original_trm(
 
     num_params = sum(p.numel() for p in adapter.parameters())
     logger.info(
-        "Loaded Original TRM: hidden=%d, params=%.1fM",
+        "Loaded Original TRM: hidden=%d, num_cells=%d, params=%.1fM",
         arch_config["hidden_size"],
+        num_cells,
         num_params / 1e6,
     )
 
@@ -455,6 +531,11 @@ def load_arc_trm(
             k = k[len("model."):]
         clean_sd[k] = v
 
+    # Extract num_cells from state dict
+    num_cells = _extract_num_cells_from_state_dict(clean_sd, default=900)
+    arch_config["num_cells"] = num_cells
+    arch_config["seq_len"] = num_cells
+
     model.load_state_dict(clean_sd, strict=False)
 
     puzzle_emb_len = arch_config["puzzle_emb_len"]
@@ -464,11 +545,14 @@ def load_arc_trm(
 
     num_params = sum(p.numel() for p in adapter.parameters())
     logger.info(
-        "Loaded ARC TRM (attention): hidden=%d, params=%.1fM",
+        "Loaded ARC TRM (attention): hidden=%d, num_cells=%d, params=%.1fM",
         arch_config["hidden_size"],
+        num_cells,
         num_params / 1e6,
     )
     return adapter, arch_config
+
+
 def resolve_matched_checkpoint(run_dir: str | Path, matched_budget: int) -> Path:
     """Find the step checkpoint closest to matched_budget in run_dir.
 

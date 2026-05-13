@@ -36,6 +36,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from scripts.mi.shared.statistics import (
+    bootstrap_ci,
+    paired_t_test,
+    cohens_d,
+    permutation_test,
+    significance_threshold,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -88,7 +96,7 @@ METRIC_REGISTRY_ARC: dict[str, list[str]] = {
     "exp2": ["trm.mean_cka"],
     "exp3": [],
     "exp4": [],
-    "exp6": ["mean_polysemanticity", "mean_hoyer", "mean_kurtosis"],
+    "exp6": ["mean_polysemanticity", "mean_hoyer", "mean_kurtosis", "feature_polysemanticity"],
     "exp7": [
         "qk_alignment.block_0.qk_frob_mean", "qk_alignment.block_0.qk_frob_std",
         "qk_alignment.block_1.qk_frob_mean", "qk_alignment.block_1.qk_frob_std",
@@ -99,11 +107,15 @@ METRIC_REGISTRY_ARC: dict[str, list[str]] = {
     ],
 }
 
+METRIC_REGISTRY_SUDOKU["exp6"].append("feature_polysemanticity")
+METRIC_REGISTRY_SUDOKU["exp6"].append("feature_polysemanticity_std")
+
 # Derived metrics extracted via custom logic
 DERIVED_METRICS = {
     "exp3": ["exp3_first_mi_input", "exp3_first_mi_target",
              "exp3_last_mi_input", "exp3_last_mi_target"],
     "exp4": ["exp4_final_pr", "exp4_mean_pr",
+             "exp4_final_eff_rank", "exp4_mean_eff_rank",
              "exp4_final_dim_90", "exp4_final_dim_95", "exp4_final_dim_99"],
 }
 
@@ -165,6 +177,12 @@ def _get_derived(data: dict, key: str) -> float | None:
         return _safe_float(trm.get(last_k, {}).get("dim_95"))
     elif key == "exp4_final_dim_99":
         return _safe_float(trm.get(last_k, {}).get("dim_99"))
+    elif key == "exp4_final_eff_rank":
+        return _safe_float(trm.get(last_k, {}).get("eff_rank"))
+    elif key == "exp4_mean_eff_rank":
+        eff_ranks = [trm[k].get("eff_rank") for k in step_keys if isinstance(trm.get(k), dict)]
+        eff_ranks = [e for e in eff_ranks if e is not None]
+        return float(np.mean(eff_ranks)) if eff_ranks else None
     return None
 
 
@@ -290,6 +308,55 @@ def aggregate_group(
             metrics[key] = bootstrap_ci(samples, n_bootstrap=n_bootstrap, rng=rng)
 
     return {"seeds": seeds, "n_seeds": len(seeds), "metrics": metrics}
+
+
+def compare_full_vs_matched(
+    full_runs: list[dict],
+    matched_runs: list[dict],
+    metric_keys: list[str],
+    derived_keys: list[str],
+    n_permutations: int,
+    rng: np.random.Generator,
+) -> dict[str, dict]:
+    """Compare full vs matched axis for each metric using paired t-test, Cohen's d, and permutation test.
+
+    Only includes metrics where data exists in both groups.
+    """
+    all_keys = metric_keys + derived_keys
+    results = {}
+
+    for key in all_keys:
+        full_samples = [v for r in full_runs if (v := _get(r["data"], key)) is not None]
+        matched_samples = [v for r in matched_runs if (v := _get(r["data"], key)) is not None]
+
+        if not full_samples or not matched_samples:
+            continue
+
+        n = min(len(full_samples), len(matched_samples))
+        if n < 2:
+            continue
+
+        aligned_full = full_samples[:n]
+        aligned_matched = matched_samples[:n]
+
+        tt = paired_t_test(aligned_full, aligned_matched)
+        cd = cohens_d(aligned_full, aligned_matched)
+        pt = permutation_test(aligned_full, aligned_matched, n_permutations=n_permutations, rng=rng)
+
+        results[key] = {
+            "mean_full":   round(float(np.mean(aligned_full)), 6),
+            "mean_matched": round(float(np.mean(aligned_matched)), 6),
+            "mean_diff":   round(float(np.mean(aligned_full) - np.mean(aligned_matched)), 6),
+            "t_stat":      tt["t_stat"],
+            "p_value":    tt["p_value"],
+            "df":         tt["df"],
+            "cohens_d":   round(float(cd), 4),
+            "permutation_p": pt["p_value"],
+            "n":           n,
+            "significance": significance_threshold(tt["p_value"]),
+        }
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +541,7 @@ def main() -> None:
     parser.add_argument("--results-dir", default=None)
     parser.add_argument("--output-dir",  default=None)
     parser.add_argument("--n-bootstrap", type=int, default=10_000)
+    parser.add_argument("--n-permutations", type=int, default=10_000)
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--domain",      default="sudoku", choices=["sudoku", "arc"])
     args = parser.parse_args()
@@ -529,14 +597,13 @@ def main() -> None:
                 result = aggregate_group(runs, metric_keys, derived_keys,
                                          args.n_bootstrap, rng)
 
-                # Add envelope metadata
                 result["domain"] = args.domain
-                result["dataset_size"] = size[1:]  # e.g. "1k"
+                result["dataset_size"] = size[1:]
                 result["axis"] = axis
 
                 exp_results[size][axis] = result
 
-                base = size[1:]  # "1k", "5k", "10k"
+                base = size[1:]
                 suffix = "_matched" if axis == "matched" else ""
                 out_path = exp_out_dir / f"{base}{suffix}.json"
                 with open(out_path, "w") as f:
@@ -548,6 +615,19 @@ def main() -> None:
                     "n_seeds": result["n_seeds"],
                     "n_metrics": len(result["metrics"]),
                 }
+
+            full_runs = grouped[size].get("full", [])
+            matched_runs = grouped[size].get("matched", [])
+            if full_runs and matched_runs:
+                comparison = compare_full_vs_matched(
+                    full_runs, matched_runs, metric_keys, derived_keys,
+                    args.n_permutations, rng,
+                )
+                if comparison:
+                    comp_path = exp_out_dir / f"{size[1:]}_full_vs_matched.json"
+                    with open(comp_path, "w") as f:
+                        json.dump(comparison, f, indent=2)
+                    logger.info("    → %s (%d metrics tested)", comp_path, len(comparison))
 
         # Plots: full-vs-matched for primary metrics
         all_keys = metric_keys + derived_keys

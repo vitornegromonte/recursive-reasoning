@@ -60,6 +60,7 @@ run_experiments() {
     local domain="${5:-sudoku}"
 
     local EXPERIMENTS=(
+        "causal_interventions.py|exp1"
         "token_mixer_dissection.py|exp7"
         "representation_similarity.py|exp2"
         "information_bottleneck.py|exp3"
@@ -75,8 +76,8 @@ run_experiments() {
     for entry in "${EXPERIMENTS[@]}"; do
         IFS='|' read -r script exp_label extra_args <<< "$entry"
 
-        # Exp5 (OOD blanks sweep) is specific to Sudoku, skip for ARC
-        if [[ "$domain" == "arc" && "$script" == "ood_blanks_sweep.py" ]]; then
+        # Exp1 (causal interventions) and Exp5 (OOD blanks sweep) are specific to Sudoku, skip for ARC
+        if [[ "$domain" == "arc" && ( "$script" == "ood_blanks_sweep.py" || "$script" == "causal_interventions.py" ) ]]; then
             continue
         fi
 

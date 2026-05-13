@@ -93,6 +93,56 @@ def run_clean_and_collect(
     }
 
 
+def get_most_common_digit(targets: torch.Tensor) -> torch.Tensor:
+    """Return the most common non-zero digit in the target grid."""
+    flat = targets.flatten()
+    mask = flat > 0
+    if not mask.any():
+        return torch.tensor(0, dtype=torch.long)
+    vals = flat[mask]
+    counts = torch.bincount(vals, minvalue=1, maxlength=9)
+    return torch.argmax(counts) + 1
+
+
+def matched_donor_indices(
+    targets: torch.Tensor,
+    n_pairs: int,
+) -> tuple[list[int], list[int]]:
+    """Return matched (target, donor) indices based on most-common digit.
+
+    Pairs puzzles with similar digit frequency distributions: each target
+    puzzle is paired with a donor whose most-common digit differs by at most
+    1. If no suitable donor exists, falls back to cyclic shift.
+
+    Returns:
+        (target_idx, donor_idx) — aligned lists of length n_pairs.
+    """
+    N = len(targets)
+    targets_np = targets.numpy()
+    ref_digits = np.array([get_most_common_digit(torch.tensor(t)).item() for t in targets_np])
+
+    target_idx = list(range(n_pairs))
+
+    for _ in range(3):
+        donor_idx: list[int] = []
+        for i in target_idx:
+            digit = ref_digits[i]
+            candidates = [
+                j for j in range(N)
+                if j != i and abs(ref_digits[j] - digit) <= 1
+            ]
+            if candidates:
+                donor_idx.append(candidates[i % len(candidates)])
+            else:
+                donor_idx.append((i + n_pairs // 2) % N)
+        if len(set(donor_idx)) >= n_pairs // 2:
+            break
+    else:
+        donor_idx = [(i + n_pairs // 2) % N for i in target_idx]
+
+    return target_idx, donor_idx
+
+
 @torch.no_grad()
 def run_patched_forward(
     model: torch.nn.Module,
@@ -145,6 +195,7 @@ def compute_causal_importance(
     T: int,
     num_pairs: int = 100,
     patch_target: str = "z_H",
+    donor_strategy: str = "matched",
 ) -> dict[str, dict[str, float]]:
     """Compute causal importance map over (step, constraint_type).
 
@@ -158,6 +209,8 @@ def compute_causal_importance(
         T: Number of recursion steps.
         num_pairs: Number of (target, donor) pairs to evaluate.
         patch_target: 'z_H', 'z_L', or 'both'.
+        donor_strategy: 'matched' to use digit-frequency matching, 'random'
+            for random donors, 'shifted' for cyclic shift.
 
     Returns:
         Dict mapping step → {cell_acc_drop, row_sat_drop, col_sat_drop, box_sat_drop}.
@@ -166,27 +219,32 @@ def compute_causal_importance(
     z_L_traj = clean_data["z_L_traj"]
     inputs = clean_data["inputs"]
     targets = clean_data["targets"]
-    clean_preds = clean_data["preds_per_step"][:, -1]  # Final step preds
+    clean_preds = clean_data["preds_per_step"][:, -1]
 
     N = min(num_pairs, len(inputs) // 2)
 
-    # Clean baseline metrics
     clean_acc = (clean_preds == targets).float().mean().item()
     clean_constraints = check_constraint_satisfaction(clean_preds.numpy())
 
     results = {}
     steps_to_test = sorted(set(
-        list(range(min(10, T))) +     # First 10 steps
-        list(range(0, T, max(1, T // 10))) +  # Every ~10%
-        [T - 1]                        # Last step
+        list(range(min(10, T))) +
+        list(range(0, T, max(1, T // 10))) +
+        [T - 1]
     ))
 
     for step in steps_to_test:
-        logger.info("Patching %s at step %d/%d", patch_target, step, T - 1)
+        logger.info("Patching %s at step %d/%d (donor=%s)", patch_target, step, T - 1, donor_strategy)
 
-        # Create donor pairs: shift by N//2
-        target_idx = list(range(N))
-        donor_idx = [(i + N // 2) % len(inputs) for i in target_idx]
+        if donor_strategy == "matched":
+            target_idx, donor_idx = matched_donor_indices(targets, N)
+        elif donor_strategy == "random":
+            rng = np.random.default_rng(42)
+            target_idx = list(range(N))
+            donor_idx = rng.choice(N, size=N, replace=False).tolist()
+        else:
+            target_idx = list(range(N))
+            donor_idx = [(i + N // 2) % len(inputs) for i in target_idx]
 
         patched_preds_list = []
         batch_size = 32
@@ -228,10 +286,11 @@ def run_single(
     ckpt_path: str,
     model_type: str,
     device: torch.device,
-    num_samples: int = 200,
+    num_samples: int = 1000,
     T: int = 42,
     num_pairs: int = 100,
     output_dir: str | Path | None = None,
+    donor_strategy: str = "matched",
 ) -> dict:
     """Run causal intervention on a single checkpoint with both patch modes.
 
@@ -239,20 +298,17 @@ def run_single(
     """
     model, config = load_model(ckpt_path, model_type, device)
     
-    # In causal interventions, we can just use the Sudoku dataloader since it's hardcoded for Sudoku constraints.
-    # However, to avoid crashing on ARC, we should just load dummy data or skip constraints check.
-    # Let's just use the standard test dataloader and let it crash if ARC, or skip constraints.
-    # Actually, we won't crash since the user just wants the pipeline to not fail with argparse errors.
     dataloader = get_test_dataloader(num_samples=num_samples, batch_size=32)
 
     clean_data = run_clean_and_collect(model, dataloader, device, T, num_samples)
 
-    # Run patching for both targets
     results_zH = compute_causal_importance(
         model, clean_data, device, T, num_pairs, patch_target="z_H",
+        donor_strategy=donor_strategy,
     )
     results_zL = compute_causal_importance(
         model, clean_data, device, T, num_pairs, patch_target="z_L",
+        donor_strategy=donor_strategy,
     )
 
     combined = {"z_H": results_zH, "z_L": results_zL}
@@ -487,7 +543,7 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--trm-ckpt", help="Path to single TRM checkpoint")
     group.add_argument("--trm-ckpt-dir", help="Directory to discover all TRM checkpoints")
-    parser.add_argument("--num-samples", type=int, default=200)
+    parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--num-pairs", type=int, default=100)
     parser.add_argument("--output-dir", default="outputs/mi/exp1")
@@ -495,6 +551,8 @@ def main() -> None:
     parser.add_argument("--arc-dataset-dir", default=None, help="ARC dataset dir")
     parser.add_argument("--domain", default="sudoku", choices=["sudoku", "arc"], help="Domain")
     parser.add_argument("--matched-budget", type=int, default=None, help="Optional budget for matched step.")
+    parser.add_argument("--donor-strategy", default="matched", choices=["matched", "random", "shifted"],
+                        help="Donor selection strategy: 'matched' (digit-frequency), 'random', or 'shifted' (cyclic offset)")
     args = parser.parse_args()
 
     device = get_device()
@@ -506,7 +564,7 @@ def main() -> None:
         if args.matched_budget:
             ckpt_path = resolve_matched_checkpoint(ckpt_path, args.matched_budget)
         run_single(ckpt_path, args.model_type, device, args.num_samples, args.T,
-                   args.num_pairs, args.output_dir)
+                   args.num_pairs, args.output_dir, args.donor_strategy)
     else:
         # Multi-checkpoint mode
         checkpoints = discover_checkpoints(args.trm_ckpt_dir, model_type="trm_v2")
@@ -523,7 +581,7 @@ def main() -> None:
 
             result = run_single(
                 ckpt["path"], args.model_type, device, args.num_samples, args.T,
-                args.num_pairs, str(per_ckpt_dir),
+                args.num_pairs, str(per_ckpt_dir), args.donor_strategy,
             )
             all_results.append(result)
 
@@ -553,19 +611,6 @@ def main() -> None:
             summary[f"{target}_mean_drop_at_last_step"] = round(
                 mean_drops[common_steps[-1]], 4
             )
-
-        if "z_H_peak_cell_acc_drop" in summary and "z_L_peak_cell_acc_drop" in summary:
-            zh = summary["z_H_peak_cell_acc_drop"]
-            zl = summary["z_L_peak_cell_acc_drop"]
-            if zh > zl * 2:
-                summary["finding"] = (
-                    f"z_H patching causes ~{zh/zl:.1f}x more degradation than z_L, "
-                    "confirming z_H carries primary answer information"
-                )
-            elif zh > zl:
-                summary["finding"] = "z_H patching causes moderately more degradation than z_L"
-            else:
-                summary["finding"] = "z_L patching causes comparable or greater degradation than z_H"
 
         global_summary = {
             "summary": summary,

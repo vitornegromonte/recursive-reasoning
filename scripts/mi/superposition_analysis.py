@@ -121,6 +121,137 @@ def compute_neuron_stats(
     }
 
 
+def compute_feature_wise_polysemanticity(
+    z_H: np.ndarray,
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    step_indices: list[int],
+    num_classes: int = 9,
+    top_k: int = 50,
+) -> dict:
+    """
+    Compute polysemanticity via feature-wise activation correlation.
+
+    A neuron is polysemantic if it responds to multiple semantically different
+    features (e.g., row constraints, digit identity) across samples.
+
+    Uses gradient-based attribution to identify which features each sample engages,
+    then measures how spread each neuron's responses are across features.
+
+    Args:
+        z_H: (N, T, num_cells, hidden) hidden states.
+        inputs: (N, num_cells, vocab_size) one-hot inputs.
+        targets: (N, num_cells) target digits.
+        step_indices: Steps to analyze.
+        num_classes: Number of target classes (9 for Sudoku digits).
+        top_k: Number of top polysemantic neurons to return.
+
+    Returns:
+        Dict with:
+        - 'neuron_poly_scores': (hidden,) polysemanticity per neuron
+        - 'feature_correlation': (hidden, num_features) neuron-feature correlation
+        - 'top_neurons': list of top polysemantic neuron indices
+        - 'mean_polysemanticity': mean polysemanticity across neurons
+    """
+    N, T, num_cells, hidden = z_H.shape
+
+    last_step_idx = step_indices[-1] if step_indices else T - 1
+    z_step = z_H[:, last_step_idx]  # (N, num_cells, hidden)
+
+    inputs_flat = inputs.reshape(N, -1)  # (N, num_cells * vocab_size)
+    targets_flat = targets.flatten()     # (N * num_cells,)
+
+    num_cells_actual = num_cells
+    num_features = num_cells_actual + num_classes
+
+    feature_activation = np.zeros((N, num_features))
+    for n in range(N):
+        for c in range(num_cells_actual):
+            feat_idx = c
+            feature_activation[n, feat_idx] = inputs_flat[n, c]
+
+        for c in range(num_cells_actual):
+            digit = targets_flat[n * num_cells_actual + c]
+            if 0 <= digit < num_classes:
+                feat_idx = num_cells_actual + digit
+                feature_activation[n, feat_idx] = 1.0
+
+    z_step_flat = z_step.reshape(N * num_cells_actual, hidden)
+
+    neuron_means = np.mean(z_step_flat, axis=0)
+    neuron_stds = np.std(z_step_flat, axis=0) + 1e-8
+
+    z_normalized = (z_step_flat - neuron_means) / neuron_stds
+
+    sample_idx = np.arange(0, N * num_cells_actual, num_cells_actual)
+    z_per_sample = z_normalized[sample_idx]
+    feature_activation_normalized = feature_activation - feature_activation.mean(axis=0)
+    feature_activation_normalized = feature_activation_normalized / (
+        np.linalg.norm(feature_activation_normalized, axis=0, keepdims=True) + 1e-8
+    )
+
+    feature_correlation = np.abs(z_per_sample.T @ feature_activation_normalized) / N
+
+    row_entropy = np.zeros(hidden)
+    box_entropy = np.zeros(hidden)
+
+    for h in range(hidden):
+        row_activation = np.zeros((N, 9))
+        digit_activation = np.zeros((N, num_classes))
+
+        for n in range(N):
+            for c in range(num_cells_actual):
+                row = c // 9
+                if feature_activation[n, c] > 0.1:
+                    row_activation[n, row] += np.abs(z_per_sample[n, h])
+
+            digit = targets_flat[n * num_cells_actual]
+            if 0 <= digit < num_classes:
+                digit_activation[n, digit] += np.abs(z_per_sample[n, h])
+
+        row_activation_norm = row_activation / (row_activation.sum(axis=1, keepdims=True) + 1e-8)
+        digit_activation_norm = digit_activation / (digit_activation.sum(axis=1, keepdims=True) + 1e-8)
+
+        row_activation_norm = row_activation_norm[row_activation_norm.sum(axis=1) > 0]
+        digit_activation_norm = digit_activation_norm[digit_activation_norm.sum(axis=1) > 0]
+
+        if len(row_activation_norm) > 0:
+            row_probs = row_activation_norm.mean(axis=0)
+            row_probs = row_probs[row_probs > 0]
+            if len(row_probs) > 0:
+                row_entropy[h] = -np.sum(row_probs * np.log(row_probs + 1e-10))
+
+        if len(digit_activation_norm) > 0:
+            digit_probs = digit_activation_norm.mean(axis=0)
+            digit_probs = digit_probs[digit_probs > 0]
+            if len(digit_probs) > 0:
+                box_entropy[h] = -np.sum(digit_probs * np.log(digit_probs + 1e-10))
+
+    combined_entropy = row_entropy + box_entropy
+    combined_entropy = combined_entropy / (np.log(9) + np.log(num_classes))
+
+    simpson_index = np.zeros(hidden)
+    for h in range(hidden):
+        corrs = feature_correlation[h]
+        corrs_sq = corrs ** 2
+        simpson_index[h] = 1.0 - np.sum(corrs_sq)
+
+    poly_scores = 0.5 * simpson_index + 0.5 * combined_entropy
+    poly_scores = np.clip(poly_scores, 0, 1)
+
+    top_neurons = np.argsort(poly_scores)[-top_k:][::-1].tolist()
+
+    return {
+        "neuron_poly_scores": poly_scores.tolist(),
+        "feature_correlation": feature_correlation.tolist(),
+        "top_neurons": top_neurons,
+        "mean_polysemanticity": float(np.mean(poly_scores)),
+        "std_polysemanticity": float(np.std(poly_scores)),
+        "mean_feature_spread": float(np.mean(simpson_index)),
+        "mean_spatial_entropy": float(np.mean(combined_entropy)),
+    }
+
+
 def identify_polysemantic_neurons(
     stats: dict[str, np.ndarray],
     step_indices: list[int],
@@ -213,14 +344,14 @@ def run_single(
     ckpt_path: str,
     model_type: str = "trm_v2",
     device=None,
-    num_samples: int = 500,
+    num_samples: int = 1000,
     T: int = 42,
     domain: str = "sudoku",
     arc_dataset_dir: str | None = None,
 ) -> dict:
     """Run superposition analysis on a single TRM checkpoint.
 
-    Returns dict with stats, poly_info, and scalar summary metrics.
+    Returns dict with stats, poly_info, feature-wise polysemanticity, and scalar summary metrics.
     """
     model, config = load_model(ckpt_path, model_type, device)
 
@@ -231,8 +362,12 @@ def run_single(
             arc_dataset_dir, num_samples=num_samples, batch_size=64, split="test",
         )
         T = config.get("H_cycles", 3) * config.get("L_cycles", 4)
+        num_classes = config.get("vocab_size", 12) - 2
+        num_cells = config.get("num_cells", 900)
     else:
         dataloader = get_test_dataloader(num_samples=num_samples, batch_size=64)
+        num_classes = 9
+        num_cells = config.get("num_cells", config.get("seq_len", 81))
 
     traj = collect_trm_dual_trajectories(
         model, dataloader, device, T=T, max_samples=num_samples,
@@ -252,13 +387,22 @@ def run_single(
     stats = compute_neuron_stats(z_H, step_indices, z_H_pre_norm=z_H_pre_norm)
     poly_info = identify_polysemantic_neurons(stats, step_indices)
 
+    inputs = traj["inputs"].float().numpy()
+    targets = traj["targets"].numpy()
+    feature_poly = compute_feature_wise_polysemanticity(
+        z_H, inputs, targets, step_indices, num_classes=num_classes,
+    )
+
     return {
         "step_indices": step_indices,
         "stats": stats,
         "poly_info": poly_info,
+        "feature_poly": feature_poly,
         "mean_polysemanticity": poly_info["mean_polysemanticity"],
         "mean_hoyer": poly_info["mean_hoyer"],
         "mean_kurtosis": poly_info["mean_kurtosis"],
+        "feature_polysemanticity": feature_poly["mean_polysemanticity"],
+        "feature_polysemanticity_std": feature_poly["std_polysemanticity"],
         "top_neurons": poly_info["top_neurons"][:10],
     }
 
@@ -267,10 +411,11 @@ def plot_superposition(
     stats: dict[str, np.ndarray],
     step_indices: list[int],
     poly_info: dict,
-    output_dir: str | Path,
+    feature_poly: dict | None = None,
+    output_dir: str | Path = ".",
     title_suffix: str = "",
 ) -> None:
-    """Plot neuron activation statistics and true polysemanticity metrics."""
+    """Plot neuron activation statistics, Hoyer-based metrics, and feature-wise polysemanticity."""
     set_paper_style()
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -384,7 +529,7 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--trm-ckpt", help="Single TRM checkpoint")
     group.add_argument("--trm-ckpt-dir", help="Directory of TRM checkpoints")
-    parser.add_argument("--num-samples", type=int, default=500)
+    parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--output-dir", default="outputs/mi/exp6")
     parser.add_argument("--model-type", default="trm_v2",
@@ -414,11 +559,14 @@ def main() -> None:
             "mean_polysemanticity": result["mean_polysemanticity"],
             "mean_hoyer": result["mean_hoyer"],
             "mean_kurtosis": result["mean_kurtosis"],
+            "feature_polysemanticity": result.get("feature_polysemanticity"),
+            "feature_polysemanticity_std": result.get("feature_polysemanticity_std"),
             "top_neurons": result["top_neurons"],
         }, "superposition_results", args.output_dir)
         plot_superposition(
             result["stats"], result["step_indices"],
-            result["poly_info"], args.output_dir,
+            result["poly_info"], result.get("feature_poly"),
+            args.output_dir,
         )
         logger.info("Done! Results saved to %s", args.output_dir)
     else:
@@ -446,11 +594,14 @@ def main() -> None:
                 "mean_polysemanticity": result["mean_polysemanticity"],
                 "mean_hoyer": result["mean_hoyer"],
                 "mean_kurtosis": result["mean_kurtosis"],
+                "feature_polysemanticity": result.get("feature_polysemanticity"),
+                "feature_polysemanticity_std": result.get("feature_polysemanticity_std"),
                 "top_neurons": result["top_neurons"],
             }, "superposition_results", str(per_dir))
             plot_superposition(
                 result["stats"], result["step_indices"],
-                result["poly_info"], str(per_dir),
+                result["poly_info"], result.get("feature_poly"),
+                str(per_dir),
                 title_suffix=f"({run_id})",
             )
 
@@ -459,6 +610,12 @@ def main() -> None:
         global_dir.mkdir(parents=True, exist_ok=True)
 
         plot_global_superposition(all_results, str(global_dir))
+
+        feature_poly_vals = [
+            r.get("feature_polysemanticity")
+            for r in all_results
+            if r.get("feature_polysemanticity") is not None
+        ]
 
         global_summary = {
             "num_checkpoints": len(all_results),
@@ -470,28 +627,26 @@ def main() -> None:
             )),
         }
 
-        # Build human-readable summary
-        mean_poly = global_summary["mean_polysemanticity"]
-        std_poly = global_summary["std_polysemanticity"]
-        if mean_poly > 0.7:
-            level = "high"
-        elif mean_poly > 0.4:
-            level = "moderate"
-        else:
-            level = "low"
+        if feature_poly_vals:
+            global_summary["feature_polysemanticity"] = float(np.mean(feature_poly_vals))
+            global_summary["feature_polysemanticity_std"] = float(np.std(feature_poly_vals))
 
         global_summary["summary"] = {
             "num_checkpoints": len(all_results),
-            "mean_polysemanticity": round(mean_poly, 4),
-            "std_polysemanticity": round(std_poly, 4),
-            "polysemanticity_level": level,
-            "finding": (
-                f"Mean polysemanticity = {mean_poly:.3f} ± {std_poly:.3f} "
-                f"({level} superposition), suggesting neurons encode "
-                f"{'multiple' if level != 'low' else 'mostly individual'} "
-                f"digit/position features"
-            ),
+            "mean_polysemanticity": round(global_summary["mean_polysemanticity"], 4),
+            "std_polysemanticity": round(global_summary["std_polysemanticity"], 4),
+            "mean_hoyer": round(float(np.mean([r["mean_hoyer"] for r in all_results])), 4),
+            "mean_kurtosis": round(float(np.mean([r["mean_kurtosis"] for r in all_results])), 4),
         }
+
+        if feature_poly_vals:
+            global_summary["summary"]["feature_polysemanticity"] = round(
+                global_summary["feature_polysemanticity"], 4
+            )
+            global_summary["summary"]["feature_polysemanticity_std"] = round(
+                global_summary["feature_polysemanticity_std"], 4
+            )
+
         save_json(global_summary, "global_results", str(global_dir))
         logger.info("Global results saved to %s", global_dir)
 

@@ -115,7 +115,7 @@ def compute_head_attention_patterns(
     model: torch.nn.Module,
     dataloader,
     device: torch.device,
-    num_samples: int = 200,
+    num_samples: int = 1000,
     T: int = 4,
     grid_h: int = 30,
     grid_w: int = 30,
@@ -321,7 +321,7 @@ def run_single(
     arc_dataset_dir: str | None = None,
     grid_h: int = 30,
     grid_w: int = 30,
-    num_samples: int = 200,
+    num_samples: int = 1000,
     domain: str = "",
 ) -> dict:
     """Run token-mixer / attention-head dissection on a single checkpoint.
@@ -556,7 +556,7 @@ def main() -> None:
                         help="ARC dataset dir for data-driven pattern analysis")
     parser.add_argument("--grid-h", type=int, default=30)
     parser.add_argument("--grid-w", type=int, default=30)
-    parser.add_argument("--num-samples", type=int, default=200)
+    parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--domain", default="", help="Domain prefix for plot titles")
     parser.add_argument("--matched-budget", type=int, default=None,
                         help="Optional budget to find nearest matched checkpoint step.")

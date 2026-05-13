@@ -70,7 +70,7 @@ def main() -> None:
                        help="Max TRM checkpoints (for testing)")
     parser.add_argument("--max-trans-ckpts", type=int, default=None,
                        help="Max Transformer checkpoints (for testing)")
-    parser.add_argument("--num-samples", type=int, default=200,
+    parser.add_argument("--num-samples", type=int, default=1000,
                        help="Num samples for experiments")
     parser.add_argument("--domain", default="sudoku", choices=["sudoku", "arc"],
                        help="Domain: sudoku (MLP-T) or arc (attention TRM)")
@@ -99,7 +99,7 @@ def main() -> None:
             if args.domain:
                 exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
-                "exp1_causal_interventions.py", exp_args, "Exp 1"
+                "causal_interventions.py", exp_args, "Exp 1"
             )
 
         elif exp_num == 2:
@@ -127,7 +127,7 @@ def main() -> None:
             if args.domain:
                 exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
-                "exp3_information_bottleneck.py", exp_args, "Exp 3"
+                "information_bottleneck.py", exp_args, "Exp 3"
             )
 
         elif exp_num == 4:
@@ -140,20 +140,18 @@ def main() -> None:
             if args.domain:
                 exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
-                "exp4_intrinsic_dimensionality.py", exp_args, "Exp 4"
+                "intrinsic_dimensionality.py", exp_args, "Exp 4"
             )
 
         elif exp_num == 5:
             exp_args = [
                 "--trm-ckpt-dir", ckpt_dir,
                 "--trans-ckpt-dir", ckpt_dir,
-                "--num-samples", str(min(args.num_samples, 500)),
+                "--num-samples", str(args.num_samples),
                 "--output-dir", f"{output_base}/exp5",
             ]
-            if args.domain:
-                exp_args += ["--domain", args.domain]
             results[exp_num] = run_experiment(
-                "exp5_ood_blanks_sweep.py", exp_args, "Exp 5"
+                "ood_blanks_sweep.py", exp_args, "Exp 5"
             )
 
         elif exp_num == 6:

@@ -27,7 +27,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -189,399 +188,9 @@ def extract_token_mixer_circuit(
 @torch.no_grad()
 def ablation_study(
     model: torch.nn.Module,
-    x_raw: torch.Tensor,
-    target_cells: list[int],
-    targets: torch.Tensor,
+    dataloader,
     device: torch.device,
-    T: int = 42,
-) -> dict:
-    """
-    Run component-level ablation on the TRM circuit via forward hooks.
-
-    All four conditions call the unmodified model() forward pass with
-    register_forward_hook callbacks that zero the relevant module output
-    at the target cell positions. This guarantees a consistent causal
-    graph across all conditions and enforces ablation monotonicity:
-
-        both_drop >= max(token_drop, channel_drop)
-
-    The old weight-mutation + manual-loop approach violated this
-    invariant because the two mechanisms used incompatible intervention
-    levels (weight-space vs activation-space).
-
-    Shape conventions (verified empirically):
-        token_mixer: receives (B, D, seq) -> returns (B, D, seq)
-            target cells zeroed on dim 2: out[:, :, target_cells] = 0
-        mlp:         receives (B, seq, D) -> returns (B, seq, D)
-            target cells zeroed on dim 1: out[:, target_cells, :] = 0
-
-    Args:
-        model: TRM model.
-        x_raw: Puzzle inputs (batch, 81, 10).
-        target_cells: Cells to analyze (must be naked singles).
-        targets: Ground truth (batch, 81).
-        device: Compute device.
-        T: Recursion steps.
-
-    Returns:
-        Dict with per-ablation accuracy results. Keys:
-            clean_acc_on_targets, ablate_token_mixer, ablate_channel_mixer,
-            ablate_both, token_mixer_drop, channel_mixer_drop, both_drop.
-    """
-    x_raw   = x_raw.to(device)
-    targets = targets.to(device)
-    target_list = sorted(set(target_cells))
-
-    def _run(token_ablate: bool, channel_ablate: bool) -> float:
-        """Single forward pass with the requested ablation hooks active."""
-        hooks: list = []
-        for layer in model.trm_net.layers:
-            if token_ablate:
-                # Token mixer: (B, D, seq) -> zero seq-dim at target positions
-                def _tok_hook(mod, inp, out, tc=target_list):
-                    out = out.clone()
-                    out[:, :, tc] = 0.0
-                    return out
-                hooks.append(layer.token_mixer.register_forward_hook(_tok_hook))
-
-            if channel_ablate:
-                # Channel MLP: (B, seq, D) -> zero seq-dim at target positions
-                def _ch_hook(mod, inp, out, tc=target_list):
-                    out = out.clone()
-                    out[:, tc, :] = 0.0
-                    return out
-                hooks.append(layer.mlp.register_forward_hook(_ch_hook))
-
-        try:
-            logits = model(x_raw, T=T)
-            preds  = logits.argmax(dim=-1)
-            return float(
-                (preds[:, target_list] == targets[:, target_list]).float().mean().item()
-            )
-        finally:
-            for h in hooks:
-                h.remove()
-
-    clean_acc   = _run(token_ablate=False, channel_ablate=False)
-    token_acc   = _run(token_ablate=True,  channel_ablate=False)
-    channel_acc = _run(token_ablate=False, channel_ablate=True)
-    both_acc    = _run(token_ablate=True,  channel_ablate=True)
-
-    token_drop   = clean_acc - token_acc
-    channel_drop = clean_acc - channel_acc
-    both_drop    = clean_acc - both_acc
-
-    # Monotonicity sanity check (log only; do not crash)
-    if both_drop < token_drop - 1e-6 or both_drop < channel_drop - 1e-6:
-        logger.warning(
-            "Ablation monotonicity violated: both_drop=%.4f < "
-            "token_drop=%.4f or channel_drop=%.4f. "
-            "Verify that token_mixer and mlp hook shapes are correct.",
-            both_drop, token_drop, channel_drop,
-        )
-
-    return {
-        "clean_acc_on_targets": clean_acc,
-        "ablate_token_mixer":   token_acc,
-        "ablate_channel_mixer": channel_acc,
-        "ablate_both":          both_acc,
-        "token_mixer_drop":     round(token_drop,   6),
-        "channel_mixer_drop":   round(channel_drop, 6),
-        "both_drop":            round(both_drop,    6),
-    }
-
-
-# Channel-Mixer Logit Attribution
-
-@torch.no_grad()
-def channel_mixer_attribution(
-    model: torch.nn.Module,
-    x_raw: torch.Tensor,
-    target_cell: int,
-    correct_digit: int,
-    device: torch.device,
-    T: int = 42,
-) -> dict:
-    """
-    Attribute the correct-digit logit to channel-mixer neurons.
-
-    At the final step, decompose the logit for the correct digit into
-    contributions from individual channel-mixer neurons.
-
-    Args:
-        model: TRM model.
-        x_raw: Single puzzle input (1, 81, 10).
-        target_cell: Cell index.
-        correct_digit: Expected digit (0-indexed).
-        device: Compute device.
-        T: Recursion steps.
-
-    Returns:
-        Dict with per-block neuron contributions.
-    """
-    x_raw = x_raw.to(device)
-    x_emb = model.embed(x_raw)
-    z_H, z_L = model.init_state(1, x_emb.size(1), device)
-
-    from src.models.trm_operator import rms_norm
-
-    # Run to final step, capturing last step's internal states
-    for _t in range(T):
-        hidden = x_emb + z_H + z_L
-        for layer in model.trm_net.layers:
-            if layer.mlp_t:
-                h_t = hidden.transpose(1, 2)
-                eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
-                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=eps)
-                hidden = h_t.transpose(1, 2)
-            eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
-            hidden = rms_norm(hidden + layer.mlp(hidden), eps=eps)
-        z_L = hidden
-
-        hidden2 = z_H + z_L
-        for layer in model.trm_net.layers:
-            if layer.mlp_t:
-                h_t = hidden2.transpose(1, 2)
-                eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
-                h_t = rms_norm(h_t + layer.token_mixer(h_t), eps=eps)
-                hidden2 = h_t.transpose(1, 2)
-            eps = getattr(layer, "rms_norm_eps", getattr(layer, "norm_eps", 1e-5))
-            hidden2 = rms_norm(hidden2 + layer.mlp(hidden2), eps=eps)
-        z_H = hidden2
-
-    # Now decompose the final z_H at target_cell through the output head
-    z_target = z_H[0, target_cell]  # (hidden_size,)
-    if hasattr(model, "inner") and hasattr(model.inner, "lm_head"):
-        output_weight = model.inner.lm_head.weight[1:10]  # (9, hidden_size)
-    else:
-        output_weight = model.output_head.lm_head.weight  # (9, hidden_size)
-
-    # Logit for correct digit = output_weight[correct_digit] · z_target
-    correct_logit = float((output_weight[correct_digit] * z_target).sum().item())
-    all_logits = (output_weight * z_target.unsqueeze(0)).sum(dim=-1)  # (num_digits,)
-
-    # Per-dimension contribution to the correct digit logit
-    per_dim_contrib = (output_weight[correct_digit] * z_target).detach().float().cpu().numpy()
-
-    # Top contributing dimensions
-    top_pos = np.argsort(per_dim_contrib)[-20:][::-1]
-    top_neg = np.argsort(per_dim_contrib)[:20]
-
-    return {
-        "correct_digit": correct_digit,
-        "correct_logit": correct_logit,
-        "all_logits": all_logits.detach().float().cpu().numpy().tolist(),
-        "top_positive_dims": top_pos.tolist(),
-        "top_positive_contribs": per_dim_contrib[top_pos].tolist(),
-        "top_negative_dims": top_neg.tolist(),
-        "top_negative_contribs": per_dim_contrib[top_neg].tolist(),
-        "total_positive": float(per_dim_contrib[per_dim_contrib > 0].sum()),
-        "total_negative": float(per_dim_contrib[per_dim_contrib < 0].sum()),
-    }
-
-# ---------------------------------------------------------------------------
-# ARC Circuit Analysis (attention TRM)
-# ---------------------------------------------------------------------------
-
-def find_arc_motifs(
-    inp: np.ndarray,
-    label: np.ndarray,
-    grid_h: int = 30,
-    grid_w: int = 30,
-    puzzle_emb_len: int = 16,
-) -> list[dict]:
-    """Find ARC 'color-copy' motifs: output cells whose value matches a
-    spatially offset input cell (identity / translation tasks).
-
-    Args:
-        inp:   (900,) input token indices (1-indexed, 0=PAD).
-        label: (900,) label token indices.
-        grid_h, grid_w: ARC grid dimensions.
-
-    Returns:
-        List of dicts with keys: cell_idx, source_idx, color, delta_r, delta_c.
-    """
-    motifs = []
-    seen_deltas: dict[tuple[int,int], int] = {}
-
-    for idx in range(grid_h * grid_w):
-        r, c = divmod(idx, grid_w)
-        tgt_color = int(label[idx])
-        if tgt_color == 0:  # PAD / background
-            continue
-
-        for dr in range(-3, 4):
-            for dc in range(-3, 4):
-                if dr == 0 and dc == 0:
-                    continue
-                src_r, src_c = r + dr, c + dc
-                if not (0 <= src_r < grid_h and 0 <= src_c < grid_w):
-                    continue
-                src_idx = src_r * grid_w + src_c
-                if int(inp[src_idx]) == tgt_color:
-                    delta = (dr, dc)
-                    seen_deltas[delta] = seen_deltas.get(delta, 0) + 1
-                    motifs.append({
-                        "cell_idx": idx,
-                        "source_idx": src_idx,
-                        "color": tgt_color,
-                        "delta_r": dr,
-                        "delta_c": dc,
-                    })
-                    break  # one match per output cell is enough
-
-    # Only keep motifs whose delta is the most common one (dominant transform)
-    if not motifs:
-        return []
-    dominant = max(seen_deltas, key=seen_deltas.get)
-    return [m for m in motifs if (m["delta_r"], m["delta_c"]) == dominant]
-
-
-@torch.no_grad()
-def extract_attention_circuit(
-    model: torch.nn.Module,
-    target_cell: int,
-    source_cell: int,
-    puzzle_emb_len: int = 16,
-) -> list[dict]:
-    """Compute the attention-routing score from source_cell to target_cell.
-
-    For each L-level block and each head, computes:
-        score_h = W_O_h @ W_V_h^T  projected onto the target->source path.
-
-    Returns:
-        List of dicts per block: head_scores, mean_score.
-    """
-    blocks_info = []
-    tgt = target_cell + puzzle_emb_len
-    src = source_cell + puzzle_emb_len
-
-    for block_idx, layer in enumerate(model.trm_net.layers):
-        attn = getattr(layer, "token_mixer", None)
-        if attn is None:
-            continue
-        num_heads = getattr(attn, "num_heads", getattr(attn, "n_heads", 8))
-
-        # Extract W_V and W_O
-        if hasattr(attn, "qkv_proj"):
-            # TinyRecursiveModels Attention
-            d = attn.qkv_proj.weight.shape[0] // 3
-            W_V = attn.qkv_proj.weight[2*d:].detach().float().cpu().numpy()
-        elif hasattr(attn, "v_proj"):
-            W_V = attn.v_proj.weight.detach().float().cpu().numpy()
-        elif hasattr(attn, "in_proj_weight"):
-            d = attn.in_proj_weight.shape[0] // 3
-            W_V = attn.in_proj_weight[2*d:].detach().float().cpu().numpy()
-        else:
-            continue
-
-        if hasattr(attn, "o_proj"):
-            W_O = attn.o_proj.weight.detach().float().cpu().numpy()
-        elif hasattr(attn, "out_proj"):
-            W_O = attn.out_proj.weight.detach().float().cpu().numpy()
-        else:
-            d_model = W_V.shape[1]
-            W_O = np.eye(d_model, dtype=np.float32)
-
-        d_model = W_V.shape[1]
-        d_head = d_model // num_heads
-        head_scores = []
-        for h in range(num_heads):
-            V_h = W_V[h * d_head: (h + 1) * d_head]    # (d_head, d_model)
-            O_h = W_O[:, h * d_head: (h + 1) * d_head] # (d_model, d_head)
-            # Effective routing score: ||O_h V_h||_F captures representational capacity
-            routing = np.linalg.norm(O_h @ V_h, "fro")
-            head_scores.append(float(routing))
-
-        blocks_info.append({
-            "block_idx": block_idx,
-            "head_scores": head_scores,
-            "mean_score": float(np.mean(head_scores)),
-            "max_score": float(np.max(head_scores)),
-            "target_cell": target_cell,
-            "source_cell": source_cell,
-        })
-
-    return blocks_info
-
-
-@torch.no_grad()
-def attention_head_ablation(
-    model: torch.nn.Module,
-    inp: torch.Tensor,
-    label: torch.Tensor,
-    target_cells: list[int],
-    device: torch.device,
-    T: int = 4,
-    puzzle_emb_len: int = 16,
-) -> dict:
-    """Ablate individual attention heads and measure accuracy on motif cells.
-
-    For each L-level block, zeroes W_V for each head independently and
-    records the accuracy drop on target cells.
-
-    Returns:
-        Dict: clean_acc, per_block_head_drops {block_idx: [drop_per_head]}.
-    """
-    inp = inp.to(device)
-    lbl = label.to(device)
-    target_list = list(target_cells)
-
-    # Clean accuracy
-    logits = model(inp, T=T)
-    preds = logits.argmax(dim=-1)
-    # Labels are 1-indexed token ids; shift to 0-indexed digit
-    clean_acc = float((preds[:, target_list] == lbl[:, target_list] - 1).float().mean())
-    results: dict = {"clean_acc": clean_acc, "per_block_head_drops": {}}
-
-    for block_idx, layer in enumerate(model.trm_net.layers):
-        attn = getattr(layer, "token_mixer", None)
-        if attn is None:
-            continue
-        num_heads = getattr(attn, "num_heads", getattr(attn, "n_heads", 8))
-
-        proj = getattr(attn, "qkv_proj", getattr(attn, "v_proj", getattr(attn, "in_proj_weight", None)))
-        if proj is None:
-            continue
-
-        head_drops = []
-        for h in range(num_heads):
-            # Save and zero head h's V projection rows
-            if hasattr(attn, "qkv_proj"):
-                d = attn.qkv_proj.weight.shape[0] // 3
-                d_head = d // num_heads
-                orig = attn.qkv_proj.weight.data.clone()
-                attn.qkv_proj.weight.data[2*d + h*d_head: 2*d + (h+1)*d_head] = 0.0
-                ablated = model(inp, T=T)
-                attn.qkv_proj.weight.data.copy_(orig)
-            elif hasattr(attn, "v_proj"):
-                orig = attn.v_proj.weight.data.clone()
-                d_head = orig.shape[0] // num_heads
-                attn.v_proj.weight.data[h*d_head:(h+1)*d_head] = 0.0
-                ablated = model(inp, T=T)
-                attn.v_proj.weight.data.copy_(orig)
-            else:
-                d = attn.in_proj_weight.shape[0] // 3
-                d_head = d // num_heads
-                orig = attn.in_proj_weight.data.clone()
-                attn.in_proj_weight.data[2*d + h*d_head: 2*d + (h+1)*d_head] = 0.0
-                ablated = model(inp, T=T)
-                attn.in_proj_weight.data.copy_(orig)
-
-            abl_preds = ablated.argmax(dim=-1)
-            abl_acc = float((abl_preds[:, target_list] == lbl[:, target_list] - 1).float().mean())
-            head_drops.append(clean_acc - abl_acc)
-
-        results["per_block_head_drops"][block_idx] = head_drops
-
-    return results
-
-
-def run_single_arc(
-    ckpt_path: str,
-    device: torch.device,
-    arc_dataset_dir: str,
-    num_samples: int = 200,
+    num_samples: int = 1000,
     T: int = 4,
     max_motifs: int = 100,
     output_dir: str | Path | None = None,
@@ -948,7 +557,7 @@ def run_single(
     ckpt_path: str,
     model_type: str = "trm_v2",
     device: torch.device = None,
-    num_samples: int = 200,
+    num_samples: int = 1000,
     T: int = 42,
     max_singles: int = 50,
     output_dir: str | Path | None = None,
@@ -1240,12 +849,11 @@ def plot_per_dataset_ablation(
 
     ablation_keys = [
         "clean_acc_on_targets",
-        "ablate_token_mixer_incoming",
-        "ablate_token_mixer_outgoing",
+        "ablate_token_mixer",
         "ablate_channel_mixer",
         "ablate_both",
     ]
-    labels = ["Clean", "-Token In", "-Token Out", "-Channel", "-Both"]
+    labels = ["Clean", "-Token", "-Channel", "-Both"]
 
     means = []
     stds = []
@@ -1361,8 +969,7 @@ def plot_global_circuit_summary(
     ax2 = axes[1]
     ablation_keys = [
         ("clean_acc_on_targets", "Clean"),
-        ("ablate_token_mixer_incoming", "-Token In"),
-        ("ablate_token_mixer_outgoing", "-Token Out"),
+        ("ablate_token_mixer", "-Token"),
         ("ablate_channel_mixer", "-Channel"),
         ("ablate_both", "-Both"),
     ]
@@ -1400,7 +1007,7 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--trm-ckpt", help="Single TRM checkpoint")
     group.add_argument("--trm-ckpt-dir", help="Directory of TRM checkpoints")
-    parser.add_argument("--num-samples", type=int, default=200)
+    parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--max-singles", type=int, default=50,
                        help="Max naked singles to analyze")
@@ -1503,8 +1110,8 @@ def main() -> None:
             ablation_keys = ["per_block_head_drops"]
         else:
             ablation_keys = [
-                "clean_acc_on_targets", "ablate_token_mixer_incoming",
-                "ablate_token_mixer_outgoing", "ablate_channel_mixer", "ablate_both",
+                "clean_acc_on_targets", "ablate_token_mixer",
+                "ablate_channel_mixer", "ablate_both",
             ]
             for key in ablation_keys:
                 vals = [r["ablation"][key] for r in all_results if r.get("ablation") and key in r["ablation"]]
@@ -1537,12 +1144,8 @@ def main() -> None:
                     clean_acc = ablation_summary.get("clean_acc_on_targets", 0)
                     most_critical_acc = ablation_conds[most_critical]
                     summary["most_critical_component"] = most_critical
-                    summary["finding"] = (
-                        f"Most critical: {most_critical} (acc={most_critical_acc:.3f} "
-                        f"vs clean={clean_acc:.3f}). {metric_key} = "
-                        f"{summary[f'mean_{metric_key}']:.2f} ± "
-                        f"{summary[f'std_{metric_key}']:.2f}"
-                    )
+                    summary["most_critical_acc"] = round(most_critical_acc, 4)
+                    summary["clean_acc"] = round(clean_acc, 4)
 
         global_summary["summary"] = summary
 

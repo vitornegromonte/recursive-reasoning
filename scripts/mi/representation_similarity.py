@@ -85,7 +85,7 @@ def run_single_trm(
     ckpt_path: str,
     model_type: str = "trm_v2",
     device=None,
-    num_samples: int = 200,
+    num_samples: int = 1000,
     T: int = 42,
     domain: str = "sudoku",
     arc_dataset_dir: str | None = None,
@@ -115,7 +115,7 @@ def run_single_trm(
 def run_single_transformer(
     ckpt_path: str,
     device,
-    num_samples: int = 200,
+    num_samples: int = 1000,
 ) -> dict:
     """Run CKA on a single Transformer checkpoint. Returns {cka_matrix, steps}."""
     model, _ = load_transformer(ckpt_path, device)
@@ -305,7 +305,7 @@ def main() -> None:
     parser.add_argument("--trans-ckpt", default=None, help="Single Transformer checkpoint")
     parser.add_argument("--trm-ckpt-dir", default=None, help="Directory of TRM checkpoints")
     parser.add_argument("--trans-ckpt-dir", default=None, help="Directory of Transformer checkpoints")
-    parser.add_argument("--num-samples", type=int, default=200)
+    parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--output-dir", default="outputs/mi/exp2")
     parser.add_argument("--model-type", default="trm_v2",
@@ -457,19 +457,9 @@ def main() -> None:
             summary["transformer_std_offdiag_cka"] = round(float(np.std(per_ckpt_avg)), 4)
 
         if "trm_avg_offdiag_cka" in summary and "transformer_avg_offdiag_cka" in summary:
-            trm_cka = summary["trm_avg_offdiag_cka"]
-            trans_cka = summary["transformer_avg_offdiag_cka"]
-            if trm_cka > trans_cka:
-                summary["finding"] = (
-                    f"TRM steps are more self-similar (CKA={trm_cka:.3f}) than "
-                    f"Transformer layers (CKA={trans_cka:.3f}), consistent with "
-                    "iterative refinement in shared-weight recursion"
-                )
-            else:
-                summary["finding"] = (
-                    f"Transformer layers show higher self-similarity (CKA={trans_cka:.3f}) "
-                    f"than TRM steps (CKA={trm_cka:.3f})"
-                )
+            summary["trm_vs_transformer_cka_ratio"] = round(
+                summary["trm_avg_offdiag_cka"] / max(summary["transformer_avg_offdiag_cka"], 1e-6), 4
+            )
 
         global_summary["summary"] = summary
 

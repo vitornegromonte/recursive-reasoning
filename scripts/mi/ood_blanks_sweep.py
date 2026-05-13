@@ -349,7 +349,7 @@ def main() -> None:
     parser.add_argument("--trans-ckpt", default=None)
     parser.add_argument("--trm-ckpt-dir", default=None, help="Directory of TRM checkpoints")
     parser.add_argument("--trans-ckpt-dir", default=None, help="Directory of Transformer checkpoints")
-    parser.add_argument("--num-samples", type=int, default=500)
+    parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--blanks", nargs="+", type=int,
                        default=[1, 2, 4, 8, 16, 32, 48, 64])
     parser.add_argument("--T-values", nargs="+", type=int,
@@ -506,18 +506,16 @@ def main() -> None:
                 "max_blanks_acc": round(trans_accs[trans_blanks[-1]], 4),
             }
 
-        # Comparative finding at highest blank count
         if all_trm_results and all_trans_results:
             max_b = blanks[-1]
             if max_b in trans_accs:
                 best_trm_t = best_t_per_blank[max_b]["best_T"]
                 trm_best = best_t_per_blank[max_b]["mean_acc"]
                 trans_val = trans_accs[max_b]
-                gap = trm_best - trans_val
-                summary["finding_at_max_blanks"] = (
-                    f"At {max_b} blanks: TRM (T={best_trm_t}) = {trm_best:.3f}, "
-                    f"Transformer = {trans_val:.3f}, gap = {gap:+.3f}"
-                )
+                summary["max_blanks_trm_acc"] = round(trm_best, 4)
+                summary["max_blanks_trans_acc"] = round(trans_val, 4)
+                summary["max_blanks_trm_T"] = best_trm_t
+                summary["max_blanks_accuracy_gap"] = round(trm_best - trans_val, 4)
 
         global_summary["summary"] = summary
 

@@ -36,24 +36,60 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
+def effective_rank(trajectories: np.ndarray, step_idx: int) -> float:
+    """
+    Compute entropy-based effective rank of representations.
+
+    Effective rank = exp(H(p)) where p_i = lambda_i / sum(lambda_i)
+    is the normalized singular value distribution. This measures how
+    many effective dimensions are needed to describe the representation.
+
+    Unlike participation ratio (sensitive to spectral outliers), effective
+    rank captures the full distribution of explained variance.
+
+    Args:
+        trajectories: (N, T, num_cells, hidden) hidden states.
+        step_idx: Step index to analyze.
+
+    Returns:
+        Effective rank (continuous, in range [1, min(N, d)]).
+    """
+    X = trajectories[:, step_idx].reshape(trajectories.shape[0], -1).astype(np.float64)
+    X = X - X.mean(axis=0, keepdims=True)
+
+    _, s, _ = np.linalg.svd(X, full_matrices=False)
+    s = s[s > 1e-12]
+    p = s / s.sum()
+
+    entropy = -np.sum(p * np.log(p + 1e-12))
+    return float(np.exp(entropy))
+
+
 def compute_id_over_steps(
     trajectories: np.ndarray,
     step_indices: list[int],
 ) -> dict[str, dict[str, float]]:
     """Compute intrinsic dimensionality metrics at each step/layer.
 
+    Computes:
+    - Participation Ratio (PR): (sum lambda^2)^2 / sum lambda^4
+    - Effective Rank: exp(entropy of normalized singular values)
+    - Explained variance thresholds (90%, 95%, 99%)
+
+    PR is sensitive to outliers; effective rank captures full distribution.
+
     Args:
-        trajectories: (N, num_steps, 81, hidden) hidden states.
+        trajectories: (N, num_steps, num_cells, hidden) hidden states.
         step_indices: Steps to analyze.
 
     Returns:
-        Dict mapping step → {pr, dim_90, dim_95, dim_99, singular_values}.
+        Dict mapping step → {pr, eff_rank, dim_90, dim_95, dim_99, singular_values}.
     """
     N = trajectories.shape[0]
     results = {}
 
     for step in step_indices:
-        # Flatten spatial + hidden: (N, 81*hidden)
+        # Flatten spatial + hidden: (N, num_cells*hidden)
         X = trajectories[:, step].reshape(N, -1).astype(np.float64)
         X = X - X.mean(axis=0, keepdims=True)
 
@@ -63,11 +99,14 @@ def compute_id_over_steps(
         total_var = s2.sum()
 
         if total_var < 1e-12:
-            results[str(step)] = {"pr": 0.0, "dim_90": 0, "dim_95": 0, "dim_99": 0}
+            results[str(step)] = {"pr": 0.0, "eff_rank": 0.0, "dim_90": 0, "dim_95": 0, "dim_99": 0}
             continue
 
         # Participation ratio
         pr = float((total_var**2) / (s2**2).sum())
+
+        # Effective rank
+        eff_rank = effective_rank(trajectories, step)
 
         # Explained variance thresholds
         cumvar = np.cumsum(s2) / total_var
@@ -77,6 +116,7 @@ def compute_id_over_steps(
 
         results[str(step)] = {
             "pr": pr,
+            "eff_rank": round(eff_rank, 2),
             "dim_90": dim_90,
             "dim_95": dim_95,
             "dim_99": dim_99,
@@ -84,8 +124,8 @@ def compute_id_over_steps(
         }
 
         logger.info(
-            "Step %d: PR=%.1f, dim90=%d, dim95=%d, dim99=%d",
-            step, pr, dim_90, dim_95, dim_99,
+            "Step %d: PR=%.1f, eff_rank=%.1f, dim90=%d, dim95=%d, dim99=%d",
+            step, pr, eff_rank, dim_90, dim_95, dim_99,
         )
 
     return results
@@ -95,14 +135,14 @@ def run_single_trm(
     ckpt_path: str,
     model_type: str = "trm_v2",
     device=None,
-    num_samples: int = 500,
+    num_samples: int = 1000,
     T: int = 42,
     domain: str = "sudoku",
     arc_dataset_dir: str | None = None,
 ) -> dict:
     """Run dimensionality analysis on a single TRM checkpoint."""
     model, config = load_model(ckpt_path, model_type, device)
-    
+
     if domain == "arc":
         if not arc_dataset_dir:
             raise ValueError("--arc-dataset-dir required for ARC")
@@ -128,7 +168,7 @@ def run_single_trm(
 def run_single_transformer(
     ckpt_path: str,
     device,
-    num_samples: int = 500,
+    num_samples: int = 1000,
 ) -> dict:
     """Run dimensionality analysis on a single Transformer checkpoint."""
     model, _ = load_transformer(ckpt_path, device)
@@ -149,10 +189,10 @@ def plot_dimensionality(
     output_dir: str | Path,
     title_suffix: str = "",
 ) -> None:
-    """Plot participation ratio and explained variance across depth."""
+    """Plot participation ratio, effective rank, and explained variance across depth."""
     set_paper_style()
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     # Participation ratio
     ax = axes[0]
@@ -170,11 +210,30 @@ def plot_dimensionality(
 
     ax.set_xlabel("Step / Layer")
     ax.set_ylabel("Participation Ratio")
-    ax.set_title("Effective Dimensionality")
+    ax.set_title("Spectral Concentration")
+    ax.legend()
+
+    # Effective rank
+    ax = axes[1]
+    if trm_results:
+        steps = sorted(int(s) for s in trm_results.keys())
+        eff_vals = [trm_results[str(s)].get("eff_rank", 0) for s in steps]
+        ax.plot(steps, eff_vals, color=COLORS["trm"], marker="o", markersize=4,
+                linewidth=2, label=LABELS["trm"])
+
+    if trans_results:
+        layers = sorted(int(s) for s in trans_results.keys())
+        eff_vals = [trans_results[str(s)].get("eff_rank", 0) for s in layers]
+        ax.plot(layers, eff_vals, color=COLORS["transformer"], marker="s",
+                markersize=4, linewidth=2, label=LABELS["transformer"])
+
+    ax.set_xlabel("Step / Layer")
+    ax.set_ylabel("Effective Rank")
+    ax.set_title("Entropy-based Dimensionality")
     ax.legend()
 
     # Explained variance thresholds
-    ax = axes[1]
+    ax = axes[2]
     thresholds = ["dim_90", "dim_95", "dim_99"]
     threshold_labels = ["90%", "95%", "99%"]
     linestyles = ["-", "--", ":"]
@@ -249,12 +308,13 @@ def plot_global_dimensionality(
     all_trans: list[dict] | None,
     output_dir: str | Path,
 ) -> None:
-    """Plot global mean participation ratio ± std across checkpoints."""
+    """Plot global mean participation ratio and effective rank ± std across checkpoints."""
     set_paper_style()
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     n = len(all_trm or []) + len(all_trans or [])
 
+    ax = axes[0]
     if all_trm:
         steps = sorted(int(s) for s in all_trm[0].keys())
         per_step = []
@@ -285,8 +345,45 @@ def plot_global_dimensionality(
 
     ax.set_xlabel("Step / Layer")
     ax.set_ylabel("Participation Ratio")
-    ax.set_title(f"Effective Dimensionality — Mean ± Std (n={n} checkpoints)")
+    ax.set_title("Spectral Concentration")
     ax.legend()
+    ax.set_title(f"Participation Ratio — Mean ± Std (n={n} checkpoints)")
+
+    ax = axes[1]
+    if all_trm:
+        steps = sorted(int(s) for s in all_trm[0].keys())
+        per_step = []
+        for step in steps:
+            vals = [r[str(step)].get("eff_rank", 0) for r in all_trm]
+            per_step.append(vals)
+        means = np.array([np.mean(v) for v in per_step])
+        stds = np.array([np.std(v) for v in per_step])
+
+        ax.plot(steps, means, color=COLORS["trm"], marker="o", markersize=4,
+                linewidth=2, label=LABELS["trm"])
+        ax.fill_between(steps, means - stds, means + stds,
+                        alpha=0.15, color=COLORS["trm"])
+
+    if all_trans:
+        layers = sorted(int(s) for s in all_trans[0].keys())
+        per_layer = []
+        for layer in layers:
+            vals = [r[str(layer)].get("eff_rank", 0) for r in all_trans]
+            per_layer.append(vals)
+        means = np.array([np.mean(v) for v in per_layer])
+        stds = np.array([np.std(v) for v in per_layer])
+
+        ax.plot(layers, means, color=COLORS["transformer"], marker="s",
+                markersize=4, linewidth=2, label=LABELS["transformer"])
+        ax.fill_between(layers, means - stds, means + stds,
+                        alpha=0.15, color=COLORS["transformer"])
+
+    ax.set_xlabel("Step / Layer")
+    ax.set_ylabel("Effective Rank")
+    ax.set_title(f"Effective Rank — Mean ± Std (n={n} checkpoints)")
+    ax.legend()
+
+    fig.suptitle("Representational Dimensionality Across Depth", fontsize=14)
     fig.tight_layout()
     save_figure(fig, "global_dimensionality", output_dir)
 
@@ -297,7 +394,7 @@ def main() -> None:
     parser.add_argument("--trans-ckpt", default=None, help="Single Transformer checkpoint")
     parser.add_argument("--trm-ckpt-dir", default=None, help="Directory of TRM checkpoints")
     parser.add_argument("--trans-ckpt-dir", default=None, help="Directory of Transformer checkpoints")
-    parser.add_argument("--num-samples", type=int, default=500)
+    parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--T", type=int, default=42)
     parser.add_argument("--output-dir", default="outputs/mi/exp4")
     parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm", "arc_trm"], help="Model type to load")
@@ -382,24 +479,30 @@ def main() -> None:
         }
 
         if all_trm:
-            dims = [r.get("intrinsic_dims") or r.get("pca_dims") for r in all_trm]
-            dims = [d for d in dims if d is not None]
-            if dims:
-                first_step_dims = [d[0] for d in dims if len(d) > 0]
-                last_step_dims = [d[-1] for d in dims if len(d) > 0]
-                if first_step_dims and last_step_dims:
-                    summary["trm_mean_dim_first_step"] = round(float(np.mean(first_step_dims)), 1)
-                    summary["trm_mean_dim_last_step"] = round(float(np.mean(last_step_dims)), 1)
+            pr_vals = []
+            eff_vals = []
+            for r in all_trm:
+                steps = sorted([int(s) for s in r.keys() if s.isdigit()])
+                if steps:
+                    pr_vals.append(r[str(steps[-1])].get("pr", 0.0))
+                    eff_vals.append(r[str(steps[-1])].get("eff_rank", 0.0))
+            if pr_vals:
+                summary["trm_mean_final_pr"] = round(float(np.mean(pr_vals)), 1)
+            if eff_vals:
+                summary["trm_mean_final_eff_rank"] = round(float(np.mean(eff_vals)), 1)
 
         if all_trans:
-            dims = [r.get("intrinsic_dims") or r.get("pca_dims") for r in all_trans]
-            dims = [d for d in dims if d is not None]
-            if dims:
-                first_layer_dims = [d[0] for d in dims if len(d) > 0]
-                last_layer_dims = [d[-1] for d in dims if len(d) > 0]
-                if first_layer_dims and last_layer_dims:
-                    summary["transformer_mean_dim_first_layer"] = round(float(np.mean(first_layer_dims)), 1)
-                    summary["transformer_mean_dim_last_layer"] = round(float(np.mean(last_layer_dims)), 1)
+            pr_vals = []
+            eff_vals = []
+            for r in all_trans:
+                steps = sorted([int(s) for s in r.keys() if s.isdigit()])
+                if steps:
+                    pr_vals.append(r[str(steps[-1])].get("pr", 0.0))
+                    eff_vals.append(r[str(steps[-1])].get("eff_rank", 0.0))
+            if pr_vals:
+                summary["transformer_mean_final_pr"] = round(float(np.mean(pr_vals)), 1)
+            if eff_vals:
+                summary["transformer_mean_final_eff_rank"] = round(float(np.mean(eff_vals)), 1)
 
         save_json({
             "summary": summary,
