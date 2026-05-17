@@ -671,6 +671,10 @@ def get_arc_dataloader(
     return DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
 
+# Cache for test datasets: avoids re-downloading HuggingFace on every checkpoint
+_test_dataset_cache: dict[tuple, Any] = {}
+
+
 def get_test_dataloader(
     num_samples: int = 500,
     num_blanks: int = 8,
@@ -678,7 +682,11 @@ def get_test_dataloader(
     seed: int = 0,
     dataset: str = "extreme",
 ) -> DataLoader:
-    """Create a Sudoku test DataLoader (unchanged)."""
+    """Create a Sudoku test DataLoader (cached — only downloads once)."""
+    cache_key = (num_samples, num_blanks, batch_size, seed, dataset)
+    if cache_key in _test_dataset_cache:
+        return _test_dataset_cache[cache_key]
+
     if dataset == "extreme":
         from src.data.tasks.sudoku import SudokuExtremeTask, SudokuTaskConfig
 
@@ -698,7 +706,9 @@ def get_test_dataloader(
             num_blanks=num_blanks,
         )
 
-    return DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    dl = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    _test_dataset_cache[cache_key] = dl
+    return dl
 
 
 def get_device() -> torch.device:
