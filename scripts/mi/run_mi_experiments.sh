@@ -61,10 +61,8 @@ run_experiments() {
 
     local EXPERIMENTS=(
         "exp2_dynamics.py|exp2"
+        "representational_similarity.py|exp1"
         "token_mixer_dissection.py|exp7"
-        "information_bottleneck.py|exp3"
-        "intrinsic_dimensionality.py|exp4"
-        "ood_blanks_sweep.py|exp5"
         "superposition_analysis.py|exp6"
         "circuit_discovery.py|exp8"
     )
