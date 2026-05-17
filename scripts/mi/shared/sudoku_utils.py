@@ -154,6 +154,29 @@ def check_constraint_satisfaction(
     return results
 
 
+def linear_cka(X: np.ndarray, Y: np.ndarray) -> float:
+    """Compute linear Centered Kernel Alignment between two representations.
+
+    Args:
+        X: Representation matrix of shape (n_samples, n_features_x).
+        Y: Representation matrix of shape (n_samples, n_features_y).
+
+    Returns:
+        CKA similarity score in [0, 1].
+    """
+    X = X - X.mean(axis=0, keepdims=True)
+    Y = Y - Y.mean(axis=0, keepdims=True)
+    XtX = X @ X.T
+    YtY = Y @ Y.T
+    hsic_xy = np.sum(XtX * YtY)
+    hsic_xx = np.sum(XtX * XtX)
+    hsic_yy = np.sum(YtY * YtY)
+    denom = np.sqrt(hsic_xx * hsic_yy)
+    if denom < 1e-12:
+        return 0.0
+    return float(hsic_xy / denom)
+
+
 def participation_ratio(X: np.ndarray) -> float:
     """Compute participation ratio (effective dimensionality) of data.
 
