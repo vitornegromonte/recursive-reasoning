@@ -35,6 +35,7 @@ GRASSMANN_RANK = 50
 PERTURBATION_EPS = 1e-4
 LYAPUNOV_SUBSET = 200
 RQA_PCA_DIMS = 50
+MAX_SAMPLES_SAFE = 2000  # safety cap: N * num_cells * hidden * T * 4 must fit in GPU
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +392,9 @@ def run_single(
     perturbation_eps: float = PERTURBATION_EPS,
     seed: int = 42,
 ) -> dict:
+    num_samples = min(num_samples, MAX_SAMPLES_SAFE)
+    if num_samples > MAX_SAMPLES_SAFE:
+        logger.warning("Capping num_samples to %d to avoid OOM", MAX_SAMPLES_SAFE)
     """Run dynamical systems analysis on a single TRM checkpoint.
 
     Returns dict with all four metric groups plus config.

@@ -100,8 +100,10 @@ def get_most_common_digit(targets: torch.Tensor) -> torch.Tensor:
     if not mask.any():
         return torch.tensor(0, dtype=torch.long)
     vals = flat[mask]
-    counts = torch.bincount(vals, minvalue=1, maxlength=9)
-    return torch.argmax(counts) + 1
+    counts = torch.zeros(10, dtype=torch.long, device=vals.device)
+    for d in range(1, 10):
+        counts[d] = (vals == d).sum()
+    return torch.argmax(counts).to(torch.long)
 
 
 def matched_donor_indices(

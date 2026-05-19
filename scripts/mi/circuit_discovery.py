@@ -599,29 +599,36 @@ def run_single(
         return {"aggregate_stats": {}, "ablation": {}}
 
     # Circuit extraction (per-checkpoint plots)
+    # NOTE: MLP-T token mixers are per-cell, not cross-token — skip circuit analysis
+    has_cross_token_mixing = not config.get("mlp_t", False)
+    circuit_results: list[dict] = []
     if output_dir:
-        circuit_results = []
         for idx, ns in enumerate(all_naked_singles[:5]):
-            circuit = extract_token_mixer_circuit(model, ns["cell_idx"], ns["peers"])
-            circuit_results.append({"naked_single": ns, "circuit": circuit})
-            plot_circuit_diagram(circuit, ns, output_dir, puzzle_idx=ns["puzzle_idx"])
+            if has_cross_token_mixing:
+                circuit = extract_token_mixer_circuit(model, ns["cell_idx"], ns["peers"])
+                circuit_results.append({"naked_single": ns, "circuit": circuit})
+                plot_circuit_diagram(circuit, ns, output_dir, puzzle_idx=ns["puzzle_idx"])
+            else:
+                logger.info("MLP-T model: no cross-token mixing, skipping circuit extraction")
             
             x_single = all_inputs[ns["puzzle_idx"]].unsqueeze(0)
             attr = channel_mixer_attribution(model, x_single, ns["cell_idx"], ns["correct_digit"], device, T=T)
-            plot_full_computational_graph(circuit, ns, attr, output_dir, puzzle_idx=ns["puzzle_idx"])
+            if has_cross_token_mixing:
+                plot_full_computational_graph(circuit, ns, attr, output_dir, puzzle_idx=ns["puzzle_idx"])
 
-    # Aggregate circuit statistics
+    # Aggregate circuit statistics (only for attention-based token mixers)
     peer_ratios = []
-    block_W_effs: dict[int, list[np.ndarray]] = {}  # block_idx -> list of W_eff rows
-    for ns in all_naked_singles:
-        circuit = extract_token_mixer_circuit(model, ns["cell_idx"], ns["peers"])
-        for block in circuit:
-            ratio = block["mean_peer_weight"] / max(block["mean_nonpeer_weight"], 1e-8)
-            peer_ratios.append(ratio)
-            bidx = block["block_idx"]
-            block_W_effs.setdefault(bidx, []).append(
-                np.abs(np.array(block["W_eff_target_row"]))
-            )
+    block_W_effs: dict[int, list[np.ndarray]] = {}
+    if has_cross_token_mixing:
+        for ns in all_naked_singles:
+            circuit = extract_token_mixer_circuit(model, ns["cell_idx"], ns["peers"])
+            for block in circuit:
+                ratio = block["mean_peer_weight"] / max(block["mean_nonpeer_weight"], 1e-8)
+                peer_ratios.append(ratio)
+                bidx = block["block_idx"]
+                block_W_effs.setdefault(bidx, []).append(
+                    np.abs(np.array(block["W_eff_target_row"]))
+                )
 
     # Per-block mean effective weight row (averaged over all naked singles)
     circuit_data = {}
@@ -638,9 +645,9 @@ def run_single(
 
     aggregate_stats = {
         "num_naked_singles": len(all_naked_singles),
-        "mean_peer_nonpeer_ratio": float(np.mean(peer_ratios)),
-        "std_peer_nonpeer_ratio": float(np.std(peer_ratios)),
-        "median_peer_nonpeer_ratio": float(np.median(peer_ratios)),
+        "mean_peer_nonpeer_ratio": float(np.mean(peer_ratios)) if peer_ratios else 0.0,
+        "std_peer_nonpeer_ratio": float(np.std(peer_ratios)) if peer_ratios else 0.0,
+        "median_peer_nonpeer_ratio": float(np.median(peer_ratios)) if peer_ratios else 0.0,
     }
 
     # Component ablation
