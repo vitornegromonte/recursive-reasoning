@@ -35,7 +35,7 @@ GRASSMANN_RANK = 50
 PERTURBATION_EPS = 1e-4
 LYAPUNOV_SUBSET = 200
 RQA_PCA_DIMS = 50
-MAX_SAMPLES_SAFE = 2000  # safety cap: N * num_cells * hidden * T * 4 must fit in GPU
+MAX_TENSOR_VOL_BYTES = 4_000_000_000  # cap so traj tensor < ~4 GB before float conversion
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +221,13 @@ def compute_rqa(
 
     z_pooled = z_H.transpose(1, 0, 2, 3).reshape(T, N * C * H)  # (T, N*C*H)
 
+    # Limit feature dimension to avoid OOM on large grids
+    MAX_RQA_FEATURES = 100_000
+    if z_pooled.shape[1] > MAX_RQA_FEATURES:
+        rng = np.random.default_rng(42)
+        feat_idx = rng.choice(z_pooled.shape[1], MAX_RQA_FEATURES, replace=False)
+        z_pooled = z_pooled[:, feat_idx]
+
     from sklearn.preprocessing import StandardScaler
     from sklearn.decomposition import PCA
 
@@ -330,6 +337,13 @@ def compute_b0_persistence(
 
     for t in step_indices:
         points = z_H[:, t].reshape(N * C, H)
+        # Subsample points if distance matrix would exceed ~1 GB
+        n_points = points.shape[0]
+        max_points = int(np.sqrt(1_000_000_000 / 4))  # 1 GB budget / 4 bytes per float
+        if n_points > max_points:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(n_points, max_points, replace=False)
+            points = points[idx]
         D = pairwise_distances(points)
         mst = minimum_spanning_tree(D).toarray()
         mst_edges = np.sort(mst[mst > 0])
@@ -392,9 +406,6 @@ def run_single(
     perturbation_eps: float = PERTURBATION_EPS,
     seed: int = 42,
 ) -> dict:
-    num_samples = min(num_samples, MAX_SAMPLES_SAFE)
-    if num_samples > MAX_SAMPLES_SAFE:
-        logger.warning("Capping num_samples to %d to avoid OOM", MAX_SAMPLES_SAFE)
     """Run dynamical systems analysis on a single TRM checkpoint.
 
     Returns dict with all four metric groups plus config.
@@ -406,6 +417,22 @@ def run_single(
     from scripts.mi.shared.plotting import save_json
 
     model, config = load_model(ckpt_path, model_type, device)
+    num_cells = config.get("num_cells", config.get("seq_len", 81))
+    hidden = config.get("hidden_size", 512)
+
+    # Dynamic sample cap: trajectory tensors (z_H + z_H_pre_norm + z_L) in bf16
+    # should stay under MAX_TENSOR_VOL_BYTES before float32 conversion on CPU
+    bytes_per_elem_bf16 = 2
+    traj_vol_bf16 = num_samples * T * num_cells * hidden * 3 * bytes_per_elem_bf16
+    # also budget for perturbed trajectory of same size
+    total_vol_bf16 = traj_vol_bf16 * 2
+    if total_vol_bf16 > MAX_TENSOR_VOL_BYTES:
+        max_samples = int(MAX_TENSOR_VOL_BYTES // (T * num_cells * hidden * 3 * 2 * bytes_per_elem_bf16))
+        max_samples = max(max_samples, 1)
+        if max_samples < num_samples:
+            logger.warning("Capping num_samples from %d to %d to avoid OOM (N*T*C*H=%d)",
+                           num_samples, max_samples, num_cells * hidden * T)
+            num_samples = max_samples
 
     if domain == "arc":
         if not arc_dataset_dir:
