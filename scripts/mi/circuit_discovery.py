@@ -612,8 +612,12 @@ def run_single(
                 logger.info("MLP-T model: no cross-token mixing, skipping circuit extraction")
             
             x_single = all_inputs[ns["puzzle_idx"]].unsqueeze(0)
-            attr = channel_mixer_attribution(model, x_single, ns["cell_idx"], ns["correct_digit"], device, T=T)
-            if has_cross_token_mixing:
+            try:
+                attr = channel_mixer_attribution(model, x_single, ns["cell_idx"], ns["correct_digit"], device, T=T)
+            except NameError:
+                logger.warning("channel_mixer_attribution not implemented, skipping")
+                attr = None
+            if has_cross_token_mixing and attr is not None:
                 plot_full_computational_graph(circuit, ns, attr, output_dir, puzzle_idx=ns["puzzle_idx"])
 
     # Aggregate circuit statistics (only for attention-based token mixers)
@@ -665,11 +669,15 @@ def run_single(
     if output_dir:
         ns0 = all_naked_singles[0]
         x_single = all_inputs[ns0["puzzle_idx"]].unsqueeze(0)
-        attribution = channel_mixer_attribution(
-            model, x_single, ns0["cell_idx"], ns0["correct_digit"],
-            device, T=T,
-        )
-        plot_logit_attribution(attribution, output_dir, ns0["puzzle_idx"])
+        try:
+            attribution = channel_mixer_attribution(
+                model, x_single, ns0["cell_idx"], ns0["correct_digit"],
+                device, T=T,
+            )
+        except NameError:
+            logger.warning("channel_mixer_attribution not implemented, skipping")
+        if attribution is not None:
+            plot_logit_attribution(attribution, output_dir, ns0["puzzle_idx"])
         plot_ablation_results(ablation_results, output_dir)
 
         # Save per-checkpoint JSON
@@ -1037,17 +1045,10 @@ def main() -> None:
         if args.matched_budget:
             ckpt_path = resolve_matched_checkpoint(ckpt_path, args.matched_budget)
 
-        if args.model_type == "arc_trm":
-            result = run_single_arc(
-                ckpt_path, device, args.arc_dataset_dir,
-                num_samples=args.num_samples, T=args.T, 
-                max_motifs=args.max_singles, output_dir=args.output_dir,
-            )
-        else:
-            result = run_single(
-                ckpt_path, args.model_type, device, args.num_samples, args.T,
-                args.max_singles, args.output_dir,
-            )
+        result = run_single(
+            ckpt_path, args.model_type, device, args.num_samples, args.T,
+            args.max_singles, args.output_dir,
+        )
             
         logger.info("Done! Results saved to %s", args.output_dir)
         if result.get("aggregate_stats"):
@@ -1071,17 +1072,10 @@ def main() -> None:
             logger.info("═" * 60)
             logger.info("Running on checkpoint: %s", run_id)
 
-            if args.model_type == "arc_trm":
-                result = run_single_arc(
-                    ckpt["path"], device, args.arc_dataset_dir,
-                    num_samples=args.num_samples, T=args.T, 
-                    max_motifs=args.max_singles, output_dir=str(per_dir),
-                )
-            else:
-                result = run_single(
-                    ckpt["path"], args.model_type, device, args.num_samples, args.T,
-                    args.max_singles, str(per_dir),
-                )
+            result = run_single(
+                ckpt["path"], args.model_type, device, args.num_samples, args.T,
+                args.max_singles, str(per_dir),
+            )
                 
             result["run_id"] = run_id
             result["data_size"] = ckpt["data_size"]
