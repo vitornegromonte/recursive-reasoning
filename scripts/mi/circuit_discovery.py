@@ -458,35 +458,41 @@ def plot_circuit_diagram(
         W_row = block["W_eff_target_row"]
         n_cells = len(W_row)
         grid_side = int(np.sqrt(n_cells))
-        weight_grid = np.zeros((grid_side, grid_side))
-        for c in range(n_cells):
-            r, col = divmod(c, grid_side)
-            weight_grid[r, col] = abs(W_row[c])
+        if grid_side * grid_side != n_cells:
+            logger.warning("Non-square W_eff (%d elements), skipping grid plot", n_cells)
+            ax.text(0.5, 0.5, f"W_eff: {n_cells} dims\n(cannot display as grid)",
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(f"Block {block_idx}: Token Mixer\nRouting → Cell {target}")
+        else:
+            weight_grid = np.zeros((grid_side, grid_side))
+            for c in range(n_cells):
+                r, col = divmod(c, grid_side)
+                weight_grid[r, col] = abs(W_row[c])
 
-        im = ax.imshow(weight_grid, cmap="YlOrRd", aspect="equal")
-        ax.set_title(f"Block {block_idx}: Token Mixer\nRouting → Cell {target}")
+            im = ax.imshow(weight_grid, cmap="YlOrRd", aspect="equal")
+            ax.set_title(f"Block {block_idx}: Token Mixer\nRouting → Cell {target}")
 
-        # Mark target cell
-        tr, tc = divmod(target, grid_side)
-        ax.plot(tc, tr, "s", markersize=20, markerfacecolor="none",
-                markeredgecolor=COLORS["trm"], markeredgewidth=3)
+            # Mark target cell
+            tr, tc = divmod(target, grid_side)
+            ax.plot(tc, tr, "s", markersize=20, markerfacecolor="none",
+                    markeredgecolor=COLORS["trm"], markeredgewidth=3)
 
-        # Mark peer cells
-        for peer in peers:
-            pr, pc = divmod(peer, grid_side)
-            ax.plot(pc, pr, "o", markersize=8, markerfacecolor="none",
-                    markeredgecolor="lime", markeredgewidth=1.5)
+            # Mark peer cells
+            for peer in peers:
+                pr, pc = divmod(peer, grid_side)
+                ax.plot(pc, pr, "o", markersize=8, markerfacecolor="none",
+                        markeredgecolor="lime", markeredgewidth=1.5)
 
-        # Draw box borders (Sudoku 3×3 boxes; skip if non-square grid)
-        box_side = int(np.sqrt(grid_side))
-        if box_side * box_side == grid_side:
-            for i in range(0, grid_side + 1, box_side):
-                ax.axhline(i - 0.5, color="black", linewidth=2)
-                ax.axvline(i - 0.5, color="black", linewidth=2)
+            # Draw box borders (Sudoku 3×3 boxes; skip if non-square grid)
+            box_side = int(np.sqrt(grid_side))
+            if box_side * box_side == grid_side:
+                for i in range(0, grid_side + 1, box_side):
+                    ax.axhline(i - 0.5, color="black", linewidth=2)
+                    ax.axvline(i - 0.5, color="black", linewidth=2)
 
-        ax.set_xticks(range(grid_side))
-        ax.set_yticks(range(grid_side))
-        plt.colorbar(im, ax=ax, shrink=0.8, label="|W_eff|")
+            ax.set_xticks(range(grid_side))
+            ax.set_yticks(range(grid_side))
+            plt.colorbar(im, ax=ax, shrink=0.8, label="|W_eff|")
 
     # Summary panel
     ax = axes[-1]
