@@ -129,11 +129,11 @@ def extract_token_mixer_circuit(
     """
     Extract effective token-mixer weights for a target←peers circuit.
 
-    For each TRMBlock, computes the effective weight W_eff[target, peer]
-    through the SwiGLU token mixer.
+    Supports SwiGLU token mixers (trm_v2) and attention-based mixers (arc_trm).
+    Per-cell MLP-T (original_trm with mlp_t=True) is skipped.
 
     Args:
-        model: SudokuTRMv2 model.
+        model: TRM model.
         target_cell: Index of the naked single cell.
         peer_cells: Indices of constraint-imposing peers.
 
@@ -144,49 +144,195 @@ def extract_token_mixer_circuit(
 
     for block_idx, layer in enumerate(model.trm_net.layers):
         mixer = layer.token_mixer
-        gate_up_w = mixer.gate_up_proj.weight.detach().float().cpu().numpy()
-        down_w = mixer.down_proj.weight.detach().float().cpu().numpy()
 
-        intermediate = gate_up_w.shape[0] // 2
-        W_up = gate_up_w[intermediate:]  # (intermediate, 81)
-        W_down = down_w  # (81, intermediate)
+        # Detect mixer type by available attributes
+        has_gate_up = hasattr(mixer, "gate_up_proj")
+        has_q_proj = hasattr(mixer, "q_proj")
 
-        # Effective weight for target cell
-        # W_eff[target, :] = W_down[target, :] @ W_up[:, :]
-        W_eff_target = W_down[target_cell] @ W_up  # (81,)
+        if has_gate_up:
+            gate_up_w = mixer.gate_up_proj.weight.detach().float().cpu().numpy()
+            down_w = mixer.down_proj.weight.detach().float().cpu().numpy()
 
-        # Per-peer weights
+            intermediate = gate_up_w.shape[0] // 2
+            W_up = gate_up_w[intermediate:]
+            W_down = down_w
+
+            W_eff_target = W_down[target_cell] @ W_up
+            seq_len = W_eff_target.shape[0]
+        elif has_q_proj:
+            logger.info("  Block %d: attention token mixer (%s) requires data for "
+                        "per-peer weights, skipping circuit extraction",
+                        block_idx, type(mixer).__name__)
+            continue
+        else:
+            logger.info("  Block %d: unknown token mixer type (%s), skipping",
+                        block_idx, type(mixer).__name__)
+            continue
+
         peer_weights = {}
         for peer in peer_cells:
-            peer_weights[peer] = float(W_eff_target[peer])
+            if peer < seq_len:
+                peer_weights[peer] = float(W_eff_target[peer])
 
-        # Also get the full row for context
         all_weights = W_eff_target.tolist()
 
-        # Channel mixer weights for this block
-        ch_mixer = layer.mlp
-        ch_gate_up = ch_mixer.gate_up_proj.weight.detach().cpu()
-        ch_down = ch_mixer.down_proj.weight.detach().cpu()
+        # Channel mixer (MLP) norm, handling both named and direct access
+        ch_mixer = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
+        if ch_mixer is not None and hasattr(ch_mixer, "down_proj"):
+            ch_down_norm = float(ch_mixer.down_proj.weight.detach().cpu().norm().item())
+        else:
+            ch_down_norm = 0.0
 
         blocks_info.append({
             "block_idx": block_idx,
             "peer_weights": peer_weights,
             "target_cell": target_cell,
             "W_eff_target_row": all_weights,
-            "mean_peer_weight": float(np.mean([abs(v) for v in peer_weights.values()])),
+            "mean_peer_weight": float(np.mean([abs(v) for v in peer_weights.values()])) if peer_weights else 0.0,
             "mean_nonpeer_weight": float(np.mean([
-                abs(all_weights[i]) for i in range(81)
+                abs(all_weights[i]) for i in range(seq_len)
                 if i != target_cell and i not in peer_cells
-            ])),
-            "channel_mixer_norm": float(ch_down.norm().item()),
+            ])) if seq_len > 0 else 0.0,
+            "channel_mixer_norm": ch_down_norm,
         })
 
     return blocks_info
 
+
 # Component-Level Ablation
 
 @torch.no_grad()
+def _compute_ablations(
+    model: torch.nn.Module,
+    x_batch: torch.Tensor,
+    y_batch: torch.Tensor,
+    target_cells: list[int],
+    device: torch.device,
+    T: int,
+) -> tuple[float, float, float, float]:
+    """Run forward pass under four conditions: clean, ablate-token, ablate-channel, ablate-both. Returns accuracies on target cells."""
+    # Check model structure — only ablate layers with gate_up_proj / down_proj
+    layers = getattr(model.trm_net, "layers", [])
+    has_swiglu = any(
+        hasattr(getattr(l, "token_mixer", None), "gate_up_proj")
+        for l in layers
+    )
+    if not has_swiglu:
+        logger.info("No SwiGLU token mixers found, ablation returns clean-only")
+        clean = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+        return clean, clean, clean, clean
+
+    # Store original weights
+    orig_token_weights = []
+    orig_channel_weights = []
+    for layer in layers:
+        tm = getattr(layer, "token_mixer", None)
+        cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
+        if tm is not None and hasattr(tm, "down_proj"):
+            orig_token_weights.append(tm.down_proj.weight.data.clone())
+        if cm is not None and hasattr(cm, "down_proj"):
+            orig_channel_weights.append(cm.down_proj.weight.data.clone())
+
+    clean = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+
+    # Ablate token mixer only
+    for layer in layers:
+        tm = getattr(layer, "token_mixer", None)
+        if tm is not None and hasattr(tm, "down_proj"):
+            tm.down_proj.weight.data.zero_()
+    ablate_token = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+    # Restore token weights
+    for layer, w in zip(layers, orig_token_weights):
+        tm = getattr(layer, "token_mixer", None)
+        if tm is not None and hasattr(tm, "down_proj"):
+            tm.down_proj.weight.data.copy_(w)
+
+    # Ablate channel mixer only
+    for layer in layers:
+        cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
+        if cm is not None and hasattr(cm, "down_proj"):
+            cm.down_proj.weight.data.zero_()
+    ablate_channel = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+    # Restore channel weights
+    for layer, w in zip(layers, orig_channel_weights):
+        cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
+        if cm is not None and hasattr(cm, "down_proj"):
+            cm.down_proj.weight.data.copy_(w)
+
+    # Ablate both
+    for layer in layers:
+        tm = getattr(layer, "token_mixer", None)
+        cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
+        if tm is not None and hasattr(tm, "down_proj"):
+            tm.down_proj.weight.data.zero_()
+        if cm is not None and hasattr(cm, "down_proj"):
+            cm.down_proj.weight.data.zero_()
+    ablate_both = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+    # Restore both
+    for layer, w in zip(layers, orig_token_weights):
+        tm = getattr(layer, "token_mixer", None)
+        if tm is not None and hasattr(tm, "down_proj"):
+            tm.down_proj.weight.data.copy_(w)
+    for layer, w in zip(layers, orig_channel_weights):
+        cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
+        if cm is not None and hasattr(cm, "down_proj"):
+            cm.down_proj.weight.data.copy_(w)
+
+    return clean, ablate_token, ablate_channel, ablate_both
+
+
+@torch.no_grad()
+def _forward_accuracy(
+    model: torch.nn.Module,
+    x_batch: torch.Tensor,
+    y_batch: torch.Tensor,
+    target_cells: list[int],
+    device: torch.device,
+    T: int,
+) -> float:
+    """Run model and return accuracy on target cells."""
+    model.eval()
+    x_emb = model.embed(x_batch.to(device))
+    seq_len = x_emb.size(1)
+    z_H, z_L = model.init_state(x_batch.size(0), seq_len, device)
+    for _ in range(T):
+        z_L = model.trm_net(x_emb, z_H, z_L)
+        z_H = model.trm_net(z_H, z_L)
+    logits = model.output_head(z_H)
+    preds = logits.argmax(dim=-1).cpu().numpy()
+    targets = y_batch.numpy()
+    if target_cells:
+        correct = sum(1 for c in target_cells
+                      if c < preds.shape[1] and preds[0, c] == targets[0, c])
+        return correct / len(target_cells)
+    return 0.0
+
+
+@torch.no_grad()
 def ablation_study(
+    model: torch.nn.Module,
+    x_batch: torch.Tensor,
+    target_cells: list[int],
+    y_batch: torch.Tensor,
+    device: torch.device,
+    T: int = 42,
+) -> dict:
+    """Run component-level ablation on Sudoku TRM: token mixer, channel mixer, both."""
+    from scripts.mi.shared.model_loader import get_test_dataloader
+
+    clean_acc, ablate_token, ablate_channel, ablate_both = _compute_ablations(
+        model, x_batch, y_batch, target_cells, device, T,
+    )
+
+    return {
+        "clean_acc_on_targets": clean_acc,
+        "ablate_token_mixer": ablate_token,
+        "ablate_channel_mixer": ablate_channel,
+        "ablate_both": ablate_both,
+    }
+
+
+def ablation_study_arc(
     model: torch.nn.Module,
     dataloader,
     device: torch.device,
@@ -198,11 +344,7 @@ def ablation_study(
     grid_w: int = 30,
 ) -> dict:
     """Run ARC spatial circuit discovery on a single checkpoint."""
-    model, config = load_model(ckpt_path, "arc_trm", device)
-    puzzle_emb_len = config.get("puzzle_emb_len", 16)
-    dataloader = get_arc_dataloader(
-        arc_dataset_dir, num_samples=num_samples, batch_size=16, split="test"
-    )
+    puzzle_emb_len = getattr(model, "puzzle_emb_len", 16)
 
     all_motifs: list[dict] = []
     all_inputs: list[torch.Tensor] = []
@@ -561,6 +703,7 @@ def run_single(
     T: int = 42,
     max_singles: int = 50,
     output_dir: str | Path | None = None,
+    arc_dataset_dir: str | None = None,
 ) -> dict:
     """
     Run circuit discovery on a single checkpoint.
@@ -568,7 +711,15 @@ def run_single(
     Returns dict with aggregate_stats and ablation results.
     """
     model, config = load_model(ckpt_path, model_type, device)
-    dataloader = get_test_dataloader(num_samples=num_samples, batch_size=32)
+    if model_type == "arc_trm":
+        if not arc_dataset_dir:
+            raise ValueError("--arc-dataset-dir required for arc_trm")
+        from scripts.mi.shared.model_loader import get_arc_dataloader
+        dataloader = get_arc_dataloader(
+            arc_dataset_dir, num_samples=num_samples, batch_size=32, split="test",
+        )
+    else:
+        dataloader = get_test_dataloader(num_samples=num_samples, batch_size=32)
 
     # Find naked singles
     all_naked_singles = []
@@ -599,17 +750,21 @@ def run_single(
         return {"aggregate_stats": {}, "ablation": {}}
 
     # Circuit extraction (per-checkpoint plots)
-    # NOTE: MLP-T token mixers are per-cell, not cross-token — skip circuit analysis
-    has_cross_token_mixing = not config.get("mlp_t", False)
+    # NOTE: per-cell token mixers (MLP-T) and attention layers both lack
+    # data-independent per-peer weight extraction — skip circuit analysis.
     circuit_results: list[dict] = []
+    has_cross_token_mixing = False
     if output_dir:
         for idx, ns in enumerate(all_naked_singles[:5]):
-            if has_cross_token_mixing:
-                circuit = extract_token_mixer_circuit(model, ns["cell_idx"], ns["peers"])
+            circuit = extract_token_mixer_circuit(model, ns["cell_idx"], ns["peers"])
+            if circuit:
+                if idx == 0:
+                    has_cross_token_mixing = True
                 circuit_results.append({"naked_single": ns, "circuit": circuit})
                 plot_circuit_diagram(circuit, ns, output_dir, puzzle_idx=ns["puzzle_idx"])
             else:
-                logger.info("MLP-T model: no cross-token mixing, skipping circuit extraction")
+                if idx == 0:
+                    logger.info("No cross-token mixing detected, skipping circuit extraction")
             
             x_single = all_inputs[ns["puzzle_idx"]].unsqueeze(0)
             try:
@@ -1048,6 +1203,7 @@ def main() -> None:
         result = run_single(
             ckpt_path, args.model_type, device, args.num_samples, args.T,
             args.max_singles, args.output_dir,
+            arc_dataset_dir=args.arc_dataset_dir,
         )
             
         logger.info("Done! Results saved to %s", args.output_dir)
@@ -1075,6 +1231,7 @@ def main() -> None:
             result = run_single(
                 ckpt["path"], args.model_type, device, args.num_samples, args.T,
                 args.max_singles, str(per_dir),
+                arc_dataset_dir=args.arc_dataset_dir,
             )
                 
             result["run_id"] = run_id
