@@ -202,83 +202,72 @@ def extract_token_mixer_circuit(
 # Component-Level Ablation
 
 @torch.no_grad()
-def _compute_ablations(
+def ablation_study(
     model: torch.nn.Module,
     x_batch: torch.Tensor,
-    y_batch: torch.Tensor,
     target_cells: list[int],
+    y_batch: torch.Tensor,
     device: torch.device,
-    T: int,
-) -> tuple[float, float, float, float]:
-    """Run forward pass under four conditions: clean, ablate-token, ablate-channel, ablate-both. Returns accuracies on target cells."""
-    # Check model structure — only ablate layers with gate_up_proj / down_proj
+    T: int = 42,
+) -> dict:
+    """Run component-level ablation on Sudoku TRM: token mixer, channel mixer, both."""
     layers = getattr(model.trm_net, "layers", [])
     has_swiglu = any(
         hasattr(getattr(l, "token_mixer", None), "gate_up_proj")
         for l in layers
     )
+
     if not has_swiglu:
         logger.info("No SwiGLU token mixers found, ablation returns clean-only")
         clean = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
-        return clean, clean, clean, clean
+        return {
+            "clean_acc_on_targets": clean,
+            "ablate_token_mixer": clean,
+            "ablate_channel_mixer": clean,
+            "ablate_both": clean,
+        }
 
-    # Store original weights
-    orig_token_weights = []
-    orig_channel_weights = []
+    # Ablate by temporarily zeroing down_proj weights, restoring after each condition
+    orig_tm = []
+    orig_cm = []
     for layer in layers:
         tm = getattr(layer, "token_mixer", None)
         cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
         if tm is not None and hasattr(tm, "down_proj"):
-            orig_token_weights.append(tm.down_proj.weight.data.clone())
+            orig_tm.append((tm, tm.down_proj.weight.data.clone()))
         if cm is not None and hasattr(cm, "down_proj"):
-            orig_channel_weights.append(cm.down_proj.weight.data.clone())
+            orig_cm.append((cm, cm.down_proj.weight.data.clone()))
 
-    clean = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+    def _restore():
+        for mod, w in orig_tm:
+            mod.down_proj.weight.data.copy_(w)
+        for mod, w in orig_cm:
+            mod.down_proj.weight.data.copy_(w)
 
-    # Ablate token mixer only
-    for layer in layers:
-        tm = getattr(layer, "token_mixer", None)
-        if tm is not None and hasattr(tm, "down_proj"):
-            tm.down_proj.weight.data.zero_()
-    ablate_token = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
-    # Restore token weights
-    for layer, w in zip(layers, orig_token_weights):
-        tm = getattr(layer, "token_mixer", None)
-        if tm is not None and hasattr(tm, "down_proj"):
-            tm.down_proj.weight.data.copy_(w)
+    try:
+        clean = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+        for mod, _ in orig_tm:
+            mod.down_proj.weight.data.zero_()
+        ablate_token = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+        _restore()
+        for mod, _ in orig_cm:
+            mod.down_proj.weight.data.zero_()
+        ablate_channel = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+        _restore()
+        for mod, _ in orig_tm + orig_cm:
+            mod.down_proj.weight.data.zero_()
+        ablate_both = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
+        _restore()
+    except Exception:
+        _restore()
+        raise
 
-    # Ablate channel mixer only
-    for layer in layers:
-        cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
-        if cm is not None and hasattr(cm, "down_proj"):
-            cm.down_proj.weight.data.zero_()
-    ablate_channel = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
-    # Restore channel weights
-    for layer, w in zip(layers, orig_channel_weights):
-        cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
-        if cm is not None and hasattr(cm, "down_proj"):
-            cm.down_proj.weight.data.copy_(w)
-
-    # Ablate both
-    for layer in layers:
-        tm = getattr(layer, "token_mixer", None)
-        cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
-        if tm is not None and hasattr(tm, "down_proj"):
-            tm.down_proj.weight.data.zero_()
-        if cm is not None and hasattr(cm, "down_proj"):
-            cm.down_proj.weight.data.zero_()
-    ablate_both = _forward_accuracy(model, x_batch, y_batch, target_cells, device, T)
-    # Restore both
-    for layer, w in zip(layers, orig_token_weights):
-        tm = getattr(layer, "token_mixer", None)
-        if tm is not None and hasattr(tm, "down_proj"):
-            tm.down_proj.weight.data.copy_(w)
-    for layer, w in zip(layers, orig_channel_weights):
-        cm = getattr(layer, "channel_mixer", getattr(layer, "mlp", None))
-        if cm is not None and hasattr(cm, "down_proj"):
-            cm.down_proj.weight.data.copy_(w)
-
-    return clean, ablate_token, ablate_channel, ablate_both
+    return {
+        "clean_acc_on_targets": clean,
+        "ablate_token_mixer": ablate_token,
+        "ablate_channel_mixer": ablate_channel,
+        "ablate_both": ablate_both,
+    }
 
 
 @torch.no_grad()
@@ -306,128 +295,6 @@ def _forward_accuracy(
                       if c < preds.shape[1] and preds[0, c] == targets[0, c])
         return correct / len(target_cells)
     return 0.0
-
-
-@torch.no_grad()
-def ablation_study(
-    model: torch.nn.Module,
-    x_batch: torch.Tensor,
-    target_cells: list[int],
-    y_batch: torch.Tensor,
-    device: torch.device,
-    T: int = 42,
-) -> dict:
-    """Run component-level ablation on Sudoku TRM: token mixer, channel mixer, both."""
-    from scripts.mi.shared.model_loader import get_test_dataloader
-
-    clean_acc, ablate_token, ablate_channel, ablate_both = _compute_ablations(
-        model, x_batch, y_batch, target_cells, device, T,
-    )
-
-    return {
-        "clean_acc_on_targets": clean_acc,
-        "ablate_token_mixer": ablate_token,
-        "ablate_channel_mixer": ablate_channel,
-        "ablate_both": ablate_both,
-    }
-
-
-def ablation_study_arc(
-    model: torch.nn.Module,
-    dataloader,
-    device: torch.device,
-    num_samples: int = 1000,
-    T: int = 4,
-    max_motifs: int = 100,
-    output_dir: str | Path | None = None,
-    grid_h: int = 30,
-    grid_w: int = 30,
-) -> dict:
-    """Run ARC spatial circuit discovery on a single checkpoint."""
-    puzzle_emb_len = getattr(model, "puzzle_emb_len", 16)
-
-    all_motifs: list[dict] = []
-    all_inputs: list[torch.Tensor] = []
-    all_labels: list[torch.Tensor] = []
-
-    for inp_batch, lbl_batch in dataloader:
-        for i in range(inp_batch.size(0)):
-            motifs = find_arc_motifs(
-                inp_batch[i].numpy(), lbl_batch[i].numpy(),
-                grid_h=grid_h, grid_w=grid_w, puzzle_emb_len=puzzle_emb_len,
-            )
-            if motifs:
-                for m in motifs:
-                    m["puzzle_idx"] = len(all_inputs)
-                all_motifs.extend(motifs[:5])
-                all_inputs.append(inp_batch[i])
-                all_labels.append(lbl_batch[i])
-        if len(all_motifs) >= max_motifs:
-            break
-
-    logger.info("Found %d ARC motifs across %d puzzles", len(all_motifs), len(all_inputs))
-
-    if not all_motifs:
-        logger.warning("No ARC motifs found — try a different dataset")
-        return {"aggregate_stats": {}, "ablation": {}}
-
-    # Circuit extraction
-    circuit_scores: list[dict] = []
-    for m in all_motifs[:50]:
-        blocks = extract_attention_circuit(
-            model, m["cell_idx"], m["source_idx"], puzzle_emb_len=puzzle_emb_len
-        )
-        mean_score = float(np.mean([b["mean_score"] for b in blocks]))
-        circuit_scores.append({"motif": m, "mean_circuit_score": mean_score})
-
-    # Ablation on first batch
-    inp_batch  = torch.stack(all_inputs[:8]).unsqueeze(0).squeeze(0)
-    lbl_batch  = torch.stack(all_labels[:8]).unsqueeze(0).squeeze(0)
-    target_cells = list({m["cell_idx"] for m in all_motifs[:50]})
-    ablation = attention_head_ablation(
-        model, inp_batch, lbl_batch, target_cells, device, T=T,
-        puzzle_emb_len=puzzle_emb_len,
-    )
-
-    agg = {
-        "num_motifs": len(all_motifs),
-        "num_puzzles": len(all_inputs),
-        "mean_circuit_score": float(np.mean([c["mean_circuit_score"] for c in circuit_scores])),
-        "dominant_delta": (
-            int(all_motifs[0]["delta_r"]), int(all_motifs[0]["delta_c"])
-        ) if all_motifs else None,
-    }
-
-    result = {"aggregate_stats": agg, "ablation": ablation}
-
-    if output_dir:
-        save_json(result, "arc_circuit_analysis", output_dir)
-        _plot_arc_head_drops(ablation, output_dir)
-
-    return result
-
-
-def _plot_arc_head_drops(
-    ablation: dict,
-    output_dir: str | Path,
-) -> None:
-    set_paper_style()
-    per_block = ablation.get("per_block_head_drops", {})
-    if not per_block:
-        return
-    n_blocks = len(per_block)
-    fig, axes = plt.subplots(1, n_blocks, figsize=(5 * n_blocks, 4), squeeze=False)
-    for bi, (blk_idx, drops) in enumerate(sorted(per_block.items())):
-        ax = axes[0, bi]
-        colors = [COLORS["incorrect"] if d > 0 else COLORS["neutral"] for d in drops]
-        ax.bar(range(len(drops)), drops, color=colors, alpha=0.8)
-        ax.axhline(0, color="gray", linewidth=0.8, linestyle=":")
-        ax.set_title(f"Block {blk_idx}")
-        ax.set_xlabel("Head index")
-        ax.set_ylabel("Accuracy drop")
-    fig.suptitle(f"Attention Head Ablation — Clean acc: {ablation['clean_acc']:.3f}", fontsize=12)
-    fig.tight_layout()
-    save_figure(fig, "arc_head_ablation", output_dir)
 
 
 def plot_circuit_diagram(
@@ -771,15 +638,6 @@ def run_single(
             else:
                 if idx == 0:
                     logger.info("No cross-token mixing detected, skipping circuit extraction")
-            
-            x_single = all_inputs[ns["puzzle_idx"]].unsqueeze(0)
-            try:
-                attr = channel_mixer_attribution(model, x_single, ns["cell_idx"], ns["correct_digit"], device, T=T)
-            except NameError:
-                logger.warning("channel_mixer_attribution not implemented, skipping")
-                attr = None
-            if has_cross_token_mixing and attr is not None:
-                plot_full_computational_graph(circuit, ns, attr, output_dir, puzzle_idx=ns["puzzle_idx"])
 
     # Aggregate circuit statistics (only for attention-based token mixers)
     peer_ratios = []
@@ -825,28 +683,15 @@ def run_single(
         model, x_batch, target_cells, y_batch, device, T=T,
     )
 
-    # Channel-mixer attribution (per-checkpoint only)
-    attribution = None
+    # Save per-checkpoint results
     if output_dir:
-        ns0 = all_naked_singles[0]
-        x_single = all_inputs[ns0["puzzle_idx"]].unsqueeze(0)
-        try:
-            attribution = channel_mixer_attribution(
-                model, x_single, ns0["cell_idx"], ns0["correct_digit"],
-                device, T=T,
-            )
-        except NameError:
-            logger.warning("channel_mixer_attribution not implemented, skipping")
-        if attribution is not None:
-            plot_logit_attribution(attribution, output_dir, ns0["puzzle_idx"])
         plot_ablation_results(ablation_results, output_dir)
 
-        # Save per-checkpoint JSON
         all_results = {
             "aggregate_stats": aggregate_stats,
             "ablation": ablation_results,
         }
-        if output_dir and circuit_results:
+        if circuit_results:
             all_results["circuit_examples"] = [
                 {
                     "cell_idx": cr["naked_single"]["cell_idx"],
@@ -863,15 +708,6 @@ def run_single(
                 }
                 for cr in circuit_results
             ]
-        if attribution:
-            ns0 = all_naked_singles[0]
-            all_results["attribution_example"] = {
-                "cell": ns0["cell_idx"],
-                "digit": ns0["correct_digit"],
-                "correct_logit": attribution["correct_logit"],
-                "total_positive": attribution["total_positive"],
-                "total_negative": attribution["total_negative"],
-            }
         save_json(all_results, "circuit_analysis", output_dir)
 
     return {
