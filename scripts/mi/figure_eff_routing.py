@@ -7,6 +7,7 @@ Layout: 3×3 grid with the Sudoku constraint graph centered.
   (5K L2 is omitted for the constraint placement)
 """
 
+import argparse
 from pathlib import Path
 
 import matplotlib
@@ -79,6 +80,11 @@ def add_grid(ax):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--unmatched", action="store_true",
+                        help="Use unmatched (standard) models for all dataset sizes")
+    args = parser.parse_args()
+
     plt.rcParams.update({
         "figure.dpi": 150, "savefig.dpi": 300, "savefig.bbox": "tight",
         "font.family": "sans-serif",
@@ -93,11 +99,12 @@ def main():
 
     adj = build_constraint_adjacency()
 
-    USE_MATCHED = {"n1k": False, "n5k": True, "n10k": True}
+    USE_MATCHED = {"n1k": False, "n5k": not args.unmatched, "n10k": not args.unmatched}
     l1 = {tag: load_averaged_Weff(tag, LAYER0_FILE, USE_MATCHED[tag]) for tag in SIZE_TAGS}
     l2 = {tag: load_averaged_Weff(tag, LAYER1_FILE, USE_MATCHED[tag]) for tag in SIZE_TAGS}
 
-    SIZE_LABELS = {"n1k": "1K", "n5k": "5K (matched)", "n10k": "10K (matched)"}
+    matched_label = "" if args.unmatched else " (matched)"
+    SIZE_LABELS = {"n1k": "1K", "n5k": f"5K{matched_label}", "n10k": f"10K{matched_label}"}
 
     # Use original (non-matched) p98 for consistent color scale
     l1_orig = {tag: load_averaged_Weff(tag, LAYER0_FILE, False) for tag in SIZE_TAGS}
@@ -116,8 +123,9 @@ def main():
         width_ratios=[0.60, 1],
     )
 
+    mode_suffix = "(unmatched)" if args.unmatched else "(matched)"
     fig.suptitle(
-        "Effective Routing Matrix — Layer 1  vs  Layer 2 (matched)",
+        f"Effective Routing Matrix — Layer 1  vs  Layer 2 {mode_suffix}",
         fontsize=13, y=0.96, ha="center",
     )
 
@@ -165,7 +173,7 @@ def main():
     fig.text(0.68, 0.02, "Target Cell Index (0\u201380)",
              ha="center", fontsize=10, color="#333333")
 
-    fname = "Figure_eff_routing_matched"
+    fname = "Figure_eff_routing_unmatched" if args.unmatched else "Figure_eff_routing_matched"
     fig.savefig(OUT / f"{fname}.pdf")
     fig.savefig(OUT / f"{fname}.png")
     plt.close(fig)

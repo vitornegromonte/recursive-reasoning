@@ -93,40 +93,68 @@ def panel_A(ax):
 #  PANEL B — Structural
 # ═══════════════════════════════════════════════════════════════════════════
 
-def panel_B(ax):
-    b0 = {s: [] for s in SIZE_ORDER}
-    b1 = {s: [] for s in SIZE_ORDER}
+def load_panel_B_data():
+    """Load linear correlations (exp7) and gate-corrected (exp8)."""
+    lin_b0: dict[str, list[float]] = {s: [] for s in SIZE_ORDER}
+    lin_b1: dict[str, list[float]] = {s: [] for s in SIZE_ORDER}
+    dd_b0: dict[str, list[float]] = {s: [] for s in SIZE_ORDER}
+    dd_b1: dict[str, list[float]] = {s: [] for s in SIZE_ORDER}
+
     for sz, d in iter_seeds("sudoku", "exp7"):
         with open(d / "mixer_analysis.json") as f:
             lin = json.load(f)["linear"]
-        b0[sz].append(lin["block_0"]["pearson_overall"])
-        b1[sz].append(lin["block_1"]["pearson_overall"])
+        lin_b0[sz].append(lin["block_0"]["pearson_overall"])
+        lin_b1[sz].append(lin["block_1"]["pearson_overall"])
 
-    sizes = [s for s in SIZE_ORDER if b0[s]]
+    for sz, d in iter_seeds("sudoku", "exp8"):
+        try:
+            with open(d / "circuit_analysis.json") as f:
+                wc = json.load(f).get("weight_correlation", {})
+            dd = wc.get("data_driven", {})
+            if "block_0" in dd:
+                dd_b0[sz].append(dd["block_0"]["pearson_overall"])
+            if "block_1" in dd:
+                dd_b1[sz].append(dd["block_1"]["pearson_overall"])
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+
+    return lin_b0, lin_b1, dd_b0, dd_b1
+
+
+def panel_B(ax):
+    lin_b0, lin_b1, dd_b0, dd_b1 = load_panel_B_data()
+
+    sizes = [s for s in SIZE_ORDER if dd_b0[s]]
+    if not sizes:
+        sizes = [s for s in SIZE_ORDER if lin_b0[s]]
     x = np.arange(len(sizes))
-
-    b0_m = np.array([np.mean(b0[s]) for s in sizes])
-    b1_m = np.array([np.mean(b1[s]) for s in sizes])
-    b1_s = np.array([np.std(b1[s]) for s in sizes])
-
     jitter = 0.04
 
-    # Mean paths
-    ax.plot(x, b0_m, "o-", color=DM_NAVY, linewidth=1.3, markersize=5,
-            label="Layer 1")
-    ax.plot(x, b1_m, "s--", color=DM_TEAL, linewidth=1.3, markersize=5,
-            label="Layer 2")
+    # ── Data-driven (primary): solid lines with error bars ──
+    dd_b0_m = np.array([np.mean(dd_b0[s]) for s in sizes])
+    dd_b1_m = np.array([np.mean(dd_b1[s]) for s in sizes])
+    dd_b0_s = np.array([np.std(dd_b0[s]) for s in sizes])
+    dd_b1_s = np.array([np.std(dd_b1[s]) for s in sizes])
 
-    # Scatter — small, translucent
+    ax.errorbar(x, dd_b0_m, yerr=dd_b0_s, fmt="o-", color=DM_NAVY,
+                linewidth=1.3, markersize=5, capsize=0, elinewidth=0.5,
+                label="Layer 1")
+    ax.errorbar(x, dd_b1_m, yerr=dd_b1_s, fmt="s-", color=DM_TEAL,
+                linewidth=1.3, markersize=5, capsize=0, elinewidth=0.5,
+                label="Layer 2")
+
+    # ── Static (secondary): unfilled markers, no connecting lines ──
     for si, sz in enumerate(sizes):
-        for v in b0[sz]:
-            ax.scatter(x[si] + np.random.uniform(-jitter, jitter), v,
-                       s=8, color=DM_NAVY_LIGHT, alpha=0.4,
-                       edgecolors="none", zorder=5)
-        for v in b1[sz]:
-            ax.scatter(x[si] + np.random.uniform(-jitter, jitter), v,
-                       s=8, color=DM_TEAL_LIGHT, alpha=0.4,
-                       edgecolors="none", zorder=5)
+        if sz not in lin_b0 or not lin_b0[sz]:
+            continue
+        for v in lin_b0[sz]:
+            ax.plot(x[si] + np.random.uniform(-jitter, jitter), v, "o",
+                    color=DM_NAVY, markersize=4, alpha=0.35,
+                    markerfacecolor="none", markeredgewidth=0.6)
+        for v in lin_b1[sz]:
+            ax.plot(x[si] + np.random.uniform(-jitter, jitter), v, "s",
+                    color=DM_TEAL, markersize=4, alpha=0.35,
+                    markerfacecolor="none", markeredgewidth=0.6)
 
     ax.legend(loc="lower left", frameon=False)
 
