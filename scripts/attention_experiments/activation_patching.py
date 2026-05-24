@@ -213,6 +213,9 @@ def run_patching_single(
 
             for pos in corrupted_positions:
                 correct = labels[0, pos].item()
+                if correct < 0:  # -100 is the ignore index for padding/prefix
+                    continue
+
                 ld_src = logit_diff(source_logits, pos, correct)
                 ld_tgt = logit_diff(target_logits, pos, correct)
                 ld_pat = logit_diff(patched_logits, pos, correct)

@@ -78,7 +78,10 @@ def collect_attention_patterns(
     for i, layer in enumerate(model.trm_net.layers):
         if _is_attention_layer(layer):
             attn = layer.token_mixer
-            h = attn.register_forward_hook(_make_manual_attn_hook(i, attn, accum))
+            h = attn.register_forward_hook(
+                _make_manual_attn_hook(i, attn, accum),
+                with_kwargs=True,
+            )
             hooks.append(h)
             accum[i] = []
 
@@ -108,8 +111,11 @@ def _make_manual_attn_hook(block_idx: int, attn: torch.nn.Module, accum: dict):
     num_heads = attn.num_heads
     head_dim = attn.head_dim
 
-    def hook(module, inp, out):
-        x = inp[0]
+    def hook(module, args, kwargs, out):
+        # Attention.forward(cos_sin, hidden_states) may be called with all kwargs
+        x = kwargs.get("hidden_states", args[0] if args else None)
+        if x is None:
+            raise RuntimeError("Cannot find hidden_states input in hook args/kwargs")
         B, L, _ = x.shape
 
         qkv = attn.qkv_proj(x)
