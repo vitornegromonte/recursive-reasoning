@@ -129,15 +129,22 @@ def _make_manual_attn_hook(block_idx: int, attn: torch.nn.Module, accum: dict):
     return hook
 
 
-def _task_name_from_dir(d: Path) -> str:
+_SKIP_DIRS = frozenset({"test", "train", "val", "validation", "metadata"})
+
+
+def _task_name_from_dir(d: Path) -> str | None:
     """Extract task-group prefix from directory name.
 
     "move_1p_aug" → "move", "mirror_reflect_h" → "mirror".
+    Returns None if the directory is a standard split (test/train) rather
+    than a task family — these are handled internally by get_arc_dataloader.
     """
     name = d.name
+    if name in _SKIP_DIRS:
+        return None
     if "_" in name:
         prefix = name.split("_")[0]
-        # Further split by digits: "move2" → "move"
+        # Strip digits: "move2" → "move"
         prefix = "".join(c for c in prefix if not c.isdigit())
         return prefix if prefix else name
     return name
@@ -147,6 +154,8 @@ def _discover_task_subdirs(dataset_dir: str) -> list[tuple[str, list[str]]]:
     """Scan dataset_dir for ConceptARC task subdirectories.
 
     Returns list of (task_name, [subdir_path, ...]) grouped by task prefix.
+    Filters out standard split dirs (test/train) which get_arc_dataloader
+    handles internally via its own split parameter.
     Caller iterates over subdirs individually to build separate dataloaders.
     """
     base = Path(dataset_dir)
@@ -160,9 +169,15 @@ def _discover_task_subdirs(dataset_dir: str) -> list[tuple[str, list[str]]]:
     groups: dict[str, list[str]] = {}
     for d in subdirs:
         prefix = _task_name_from_dir(d)
+        if prefix is None:
+            continue  # skip standard-split dirs (test, train, …)
         groups.setdefault(prefix, []).append(str(d))
 
-    result = sorted(groups.items())  # deterministic order
+    if not groups:
+        # Only standard splits found — pool everything
+        return [("pooled", [str(dataset_dir)])]
+
+    result = sorted(groups.items())
     logger.info("ConceptARC task groups: %s", dict(result))
     return result
 

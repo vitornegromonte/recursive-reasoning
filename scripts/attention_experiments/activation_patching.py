@@ -54,7 +54,7 @@ def _detect_input_format(x: torch.Tensor) -> str:
         if x.dim() == 3:
             return "one_hot"
         return "float_ids"
-    if x.dtype == torch.long or x.dtype == torch.int64:
+    if x.dtype in (torch.long, torch.int64, torch.int32):
         return "integer_ids"
     return f"unknown({x.dtype},{x.shape})"
 
