@@ -214,11 +214,11 @@ def extract_token_mixer_circuit(
 
         # --- Gate-corrected W_eff (when x_raw is provided) ---
         if x_raw is not None and block_idx in captured_h_t:
-            h_t = captured_h_t[block_idx]  # (1, hidden_size, num_cells)
-            # Gate = sigmoid(W_gate @ h_t[:, cell]) for each cell
-            # h_t[0] is (hidden_size, num_cells); W_gate @ h_t[0] → (intermediate, num_cells)
-            gate_all = torch.sigmoid(W_gate @ h_t[0])  # (intermediate, num_cells)
-            gate_avg = gate_all.mean(dim=1)  # (intermediate,)
+            h_t = captured_h_t[block_idx]  # (1, hidden_size, seq_len)
+            # Gate = sigmoid(hidden_state @ W_gate.T) for each cell
+            # h_t[0] is (hidden_size, seq_len); h_t[0] @ W_gate.T → (hidden_size, inter)
+            gate_all = torch.sigmoid(h_t[0] @ W_gate.T)  # (hidden_size, inter)
+            gate_avg = gate_all.mean(dim=0)  # (inter,) — mean over hidden_size
             # W_eff_gated = W_down[target_cell] @ diag(gate_avg) @ W_up
             W_eff_gated = (W_down[target_cell] * gate_avg) @ W_up  # (num_cells,)
             W_eff_gated_np = W_eff_gated.cpu().numpy()
