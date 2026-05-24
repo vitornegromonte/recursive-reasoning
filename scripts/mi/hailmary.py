@@ -835,11 +835,11 @@ def compute_full_W_eff_correlation(
         if bidx not in captured:
             continue
         p = b["p"]
-        h_t = captured[bidx]                          # (1, N, N)
-        h_grid = h_t[0, p:, :]                         # (num_cells, N)
-        gate_all = torch.sigmoid(b["W_gate"] @ h_grid)  # (inter, num_cells)
-        gate_avg = gate_all.mean(dim=1)                # (inter,)
-        W_eff = (b["W_down"] * gate_avg[None, :]) @ b["W_up"]  # (num_cells, num_cells)
+        h_t = captured[bidx]                                    # (1, hidden_size, seq_len)
+        h_grid = h_t[:, :, p:]                                   # (1, hidden_size, num_cells)
+        gate_logits = h_grid @ b["W_gate"].T                     # (1, hidden_size, inter)
+        gate_avg = torch.sigmoid(gate_logits).mean(dim=1).squeeze(0)  # (inter,)
+        W_eff = (b["W_down"] * gate_avg[None, :]) @ b["W_up"]   # (num_cells, num_cells)
         data_corr[f"block_{bidx}"] = analyze_sudoku_correlation(W_eff.cpu().numpy(), adj, type_adjs)
 
     return {"linear": linear_corr, "data_driven": data_corr}
