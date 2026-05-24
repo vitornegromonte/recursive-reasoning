@@ -111,17 +111,23 @@ def corrupt_input(
         raise TypeError(f"Cannot corrupt input of format: {fmt}")
 
 
-def logit_diff(logits: torch.Tensor, pos: int, correct_token: int) -> float:
+def logit_diff(logits: torch.Tensor, pos: int, correct_token: int) -> float | None:
     """Logit of correct token minus max logit of wrong tokens at position pos.
 
     Assumes batch_size == 1 (see caller in run_patching_single).
+    Returns None if correct_token is outside the model's output vocabulary
+    (the ARC output head maps tokens 1-9 to logit indices 0-8).
     """
     assert logits.shape[0] == 1, f"logit_diff expects batch_size=1, got {logits.shape[0]}"
+    logit_idx = correct_token - 1
+    num_logits = logits.shape[-1]
+    if logit_idx < 0 or logit_idx >= num_logits:
+        return None
     logits_at_pos = logits[0, pos]
-    correct_logit = logits_at_pos[correct_token].item()
+    correct_logit = logits_at_pos[logit_idx].item()
     wrong_max = torch.cat([
-        logits_at_pos[:correct_token],
-        logits_at_pos[correct_token + 1:],
+        logits_at_pos[:logit_idx],
+        logits_at_pos[logit_idx + 1:],
     ]).max().item()
     return correct_logit - wrong_max
 
@@ -219,6 +225,9 @@ def run_patching_single(
                 ld_src = logit_diff(source_logits, pos, correct)
                 ld_tgt = logit_diff(target_logits, pos, correct)
                 ld_pat = logit_diff(patched_logits, pos, correct)
+
+                if ld_src is None or ld_tgt is None or ld_pat is None:
+                    continue  # token outside model's output vocabulary
 
                 gap = ld_src - ld_tgt
                 recovery = (ld_pat - ld_tgt) / gap if abs(gap) > 1e-8 else 0.0
