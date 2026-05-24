@@ -154,14 +154,18 @@ def extract_token_mixer_circuit(
 
     # Run forward pass once to capture pre-token-mixer hidden states for ALL blocks
     captured_h_t: dict[int, torch.Tensor] = {}
+    pre_hook_handles: list = []
     if x_raw is not None:
         for block_idx, layer in enumerate(model.trm_net.layers):
             def _make_pre_hook(bidx):
                 def _pre_hook(mod, inp):
                     captured_h_t[bidx] = inp[0].detach().float()
                 return _pre_hook
-            layer.token_mixer.register_forward_pre_hook(_make_pre_hook(block_idx))
+            handle = layer.token_mixer.register_forward_pre_hook(_make_pre_hook(block_idx))
+            pre_hook_handles.append(handle)
         _ = model(x_raw, T=T)
+        for handle in pre_hook_handles:
+            handle.remove()
 
     blocks_info = []
 
@@ -206,9 +210,9 @@ def extract_token_mixer_circuit(
         # --- Gate-corrected W_eff (when x_raw is provided) ---
         if x_raw is not None and block_idx in captured_h_t:
             h_t = captured_h_t[block_idx]  # (1, hidden_size, num_cells)
-            # Gate = sigmoid(W_gate @ h_t[d, :]) for each hidden dim d
-            # h_t[0] is (hidden_size, num_cells); W_gate @ h_t[0].T → (intermediate, hidden_size)
-            gate_all = torch.sigmoid(W_gate @ h_t[0].T)  # (intermediate, hidden_size)
+            # Gate = sigmoid(W_gate @ h_t[:, cell]) for each cell
+            # h_t[0] is (hidden_size, num_cells); W_gate @ h_t[0] → (intermediate, num_cells)
+            gate_all = torch.sigmoid(W_gate @ h_t[0])  # (intermediate, num_cells)
             gate_avg = gate_all.mean(dim=1)  # (intermediate,)
             # W_eff_gated = W_down[target_cell] @ diag(gate_avg) @ W_up
             W_eff_gated = (W_down[target_cell] * gate_avg) @ W_up  # (num_cells,)
@@ -771,6 +775,14 @@ def run_single(
     ema_state = ckpt_data.get("ema_state_dict") or ckpt_data.get("model_ema")
     if ema_state is not None:
         logger.info("EMA weights found; applying over live weights")
+        model_keys = set(model.state_dict().keys())
+        ema_keys = set(ema_state.keys())
+        overlap = model_keys & ema_keys
+        if len(overlap) < len(model_keys) * 0.5:
+            logger.warning(
+                f"EMA state dict overlap with model keys is only {len(overlap)}/{len(model_keys)}; "
+                "strict=False may load nothing meaningful"
+            )
         model.load_state_dict(ema_state, strict=False)
     del ckpt_data
 

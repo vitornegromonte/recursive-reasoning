@@ -112,9 +112,9 @@ def extract_layer_W_eff(
         if h_t is None:
             raise RuntimeError(f"No hidden state captured for block {block_idx}")
 
-        # gate: σ(W_gate @ h_t[0].T) averaged over cells
-        # h_t[0] is (N, N); .T gives (N, N); result is (inter, N)
-        gate_all = torch.sigmoid(w["W_gate"] @ h_t[0].T)  # (inter, N)
+        # gate: σ(W_gate @ h_t[:, cell]) averaged over cells
+        # h_t[0] is (N, N); W_gate @ h_t[0] → (inter, N)
+        gate_all = torch.sigmoid(w["W_gate"] @ h_t[0])  # (inter, N)
         gate_avg = gate_all.mean(dim=1)  # (inter,)
 
         W_eff = (w["W_down"] * gate_avg[None, :]) @ w["W_up"]  # (N, N)
