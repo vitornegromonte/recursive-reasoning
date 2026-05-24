@@ -61,21 +61,27 @@ run_experiments() {
 
     local EXPERIMENTS=(
         "causal_interventions.py|exp1"
-        "exp2_dynamics.py|exp2"
         "representation_similarity.py|exp_cka"
         "superposition_analysis.py|exp6"
         "token_mixer_dissection.py|exp7"
-        "circuit_discovery.py|exp8"
+        "exp2_dynamics.py|exp2"
+        "hailmary.py|exp8"
+        "attention_circuit.py|exp9"
     )
 
     # Scripts that accept --domain
-    local DOMAIN_SCRIPTS="exp2_dynamics.py|representation_similarity.py|superposition_analysis.py|token_mixer_dissection.py|circuit_discovery.py"
+    local DOMAIN_SCRIPTS="exp2_dynamics.py|representation_similarity.py|superposition_analysis.py|token_mixer_dissection.py|hailmary.py"
 
     for entry in "${EXPERIMENTS[@]}"; do
         IFS='|' read -r script exp_label extra_args <<< "$entry"
 
         # Exp1 (causal interventions) is specific to Sudoku, skip for ARC
         if [[ "$domain" == "arc" && "$script" == "causal_interventions.py" ]]; then
+            continue
+        fi
+
+        # Exp9 (attention circuit) is specific to ARC, skip for Sudoku
+        if [[ "$script" == "attention_circuit.py" && "$domain" != "arc" ]]; then
             continue
         fi
 
