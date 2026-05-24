@@ -133,7 +133,6 @@ def run_single(
         dataset_dir=dataset_dir,
         batch_size=32,
         num_samples=num_samples,
-        shuffle=False,
     )
     patterns = collect_attention_patterns(model, dataloader, device, num_samples, T)
     logger.info("Collected patterns for %d blocks", len(patterns))

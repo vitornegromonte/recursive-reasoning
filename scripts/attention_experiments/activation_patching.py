@@ -113,7 +113,6 @@ def run_single(
         dataset_dir=dataset_dir,
         batch_size=1,
         num_samples=num_samples,
-        shuffle=True,
     )
 
     all_results = []
