@@ -34,7 +34,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from scripts.mi.shared.model_loader import get_device, get_test_dataloader, load_trm, load_model, resolve_matched_checkpoint
 from scripts.mi.shared.multi_checkpoint import discover_checkpoints
 from scripts.mi.shared.plotting import COLORS, save_figure, save_json, set_paper_style
-from scripts.mi.shared.sudoku_utils import get_constraint_groups
+from scripts.mi.shared.sudoku_utils import (
+    get_constraint_adjacency,
+    get_constraint_groups,
+    get_constraint_type_adjacency,
+)
+from scripts.mi.token_mixer_dissection import analyze_sudoku_correlation
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -754,6 +759,82 @@ def plot_logit_attribution(
     save_figure(fig, f"logit_attribution_puzzle{puzzle_idx}", output_dir)
 
 
+def compute_full_W_eff_correlation(
+    model: torch.nn.Module,
+    x_raw: torch.Tensor,
+    T: int = 42,
+) -> dict:
+    """Compute full W_eff matrix correlation for both linear and gate-corrected variants.
+
+    Linear:  W_eff = W_down @ W_up
+    Gated:   W_eff = W_down @ diag(mean(σ(W_gate @ h))) @ W_up
+             where h is the hidden state entering each block's token mixer,
+             averaged over cells.
+
+    Returns:
+        dict with keys "linear" and "data_driven", each mapping block_0, block_1
+        to per-block correlation dicts from analyze_sudoku_correlation.
+    """
+    adj = get_constraint_adjacency(9)
+    type_adjs = get_constraint_type_adjacency(9)
+
+    blocks = []
+    for i, layer in enumerate(model.trm_net.layers):
+        mixer = getattr(layer, "token_mixer", None)
+        if mixer is None or not hasattr(mixer, "gate_up_proj"):
+            continue
+        gate_up = mixer.gate_up_proj.weight.detach().float()
+        down = mixer.down_proj.weight.detach().float()
+        inter = gate_up.shape[0] // 2
+        blocks.append({
+            "block_idx": i,
+            "W_gate": gate_up[:inter],  # (inter, N)
+            "W_up": gate_up[inter:],    # (inter, N)
+            "W_down": down,             # (N, inter)
+        })
+
+    if not blocks:
+        return {}
+
+    # Linear approximation
+    linear_corr: dict[str, dict] = {}
+    for b in blocks:
+        W_eff = (b["W_down"] @ b["W_up"]).cpu().numpy()
+        linear_corr[f"block_{b['block_idx']}"] = analyze_sudoku_correlation(W_eff, adj, type_adjs)
+
+    # Gate-corrected: capture pre-token-mixer hidden states
+    captured: dict[int, torch.Tensor] = {}
+    handles = []
+    for b in blocks:
+        def _make_pre_hook(bidx):
+            def _hook(mod, inp):
+                captured[bidx] = inp[0].detach().float()
+            return _hook
+        h = model.trm_net.layers[b["block_idx"]].token_mixer.register_forward_pre_hook(
+            _make_pre_hook(b["block_idx"])
+        )
+        handles.append(h)
+
+    with torch.no_grad():
+        _ = model(x_raw, T=T)
+
+    for h in handles:
+        h.remove()
+
+    data_corr: dict[str, dict] = {}
+    for b in blocks:
+        bidx = b["block_idx"]
+        if bidx not in captured:
+            continue
+        h_t = captured[bidx]  # (1, N, N)
+        gate_all = torch.sigmoid(b["W_gate"] @ h_t[0])  # (inter, N)
+        gate_avg = gate_all.mean(dim=1)  # (inter,)
+        W_eff = (b["W_down"] * gate_avg[None, :]) @ b["W_up"]  # (N, N)
+        data_corr[f"block_{bidx}"] = analyze_sudoku_correlation(W_eff.cpu().numpy(), adj, type_adjs)
+
+    return {"linear": linear_corr, "data_driven": data_corr}
+
+
 def run_single(
     ckpt_path: str,
     model_type: str = "trm_v2",
@@ -766,7 +847,7 @@ def run_single(
     """
     Run circuit discovery on a single checkpoint.
 
-    Returns dict with aggregate_stats and ablation results.
+    Returns dict with aggregate_stats, ablation, and weight_correlation results.
     """
     model, config = load_model(ckpt_path, model_type, device)
 
@@ -824,6 +905,21 @@ def run_single(
     except NotImplementedError as e:
         logger.warning("Skipping circuit analysis: %s", e)
         return {"aggregate_stats": {}, "ablation": {}}
+
+    # Full W_eff matrix correlation (linear + gate-corrected)
+    weight_corr: dict = {}
+    if all_inputs:
+        x_first = all_inputs[0].unsqueeze(0).to(device)
+        weight_corr = compute_full_W_eff_correlation(model, x_first, T=T)
+        if weight_corr:
+            for variant in ("linear", "data_driven"):
+                for bk, corr in weight_corr.get(variant, {}).items():
+                    logger.info(
+                        "  W_eff [%s/%s]: pearson_overall=%.4f, pearson_row=%.4f, "
+                        "pearson_col=%.4f, pearson_box=%.4f",
+                        variant, bk, corr["pearson_overall"],
+                        corr["pearson_row"], corr["pearson_col"], corr["pearson_box"],
+                    )
 
     # Circuit extraction (per-checkpoint plots)
     if output_dir:
@@ -901,6 +997,7 @@ def run_single(
         all_results = {
             "aggregate_stats": aggregate_stats,
             "ablation": ablation_results,
+            "weight_correlation": weight_corr,
         }
         if output_dir and circuit_results:
             all_results["circuit_examples"] = [
@@ -934,6 +1031,7 @@ def run_single(
         "aggregate_stats": aggregate_stats,
         "ablation": ablation_results,
         "circuit_data": circuit_data,
+        "weight_correlation": weight_corr,
     }
 
 
@@ -1267,6 +1365,31 @@ def main() -> None:
                     "std": float(np.std(vals)),
                     "values": vals,
                 }
+
+        # Aggregate weight correlation stats across checkpoints
+        wcorr_variants = ["linear", "data_driven"]
+        wcorr_blocks = ["block_0", "block_1"]
+        wcorr_metrics = ["pearson_overall", "pearson_row", "pearson_col", "pearson_box"]
+        weight_correlation_agg: dict[str, dict[str, dict[str, dict]]] = {}
+        for variant in wcorr_variants:
+            weight_correlation_agg[variant] = {}
+            for bk in wcorr_blocks:
+                weight_correlation_agg[variant][bk] = {}
+                for mc in wcorr_metrics:
+                    vals = [
+                        r["weight_correlation"][variant][bk][mc]
+                        for r in all_results
+                        if r.get("weight_correlation", {})
+                        .get(variant, {}).get(bk)
+                    ]
+                    if vals:
+                        weight_correlation_agg[variant][bk][mc] = {
+                            "mean": float(np.mean(vals)),
+                            "std": float(np.std(vals)),
+                            "values": vals,
+                        }
+        if weight_correlation_agg.get("linear", {}).get("block_0"):
+            global_summary["weight_correlation"] = weight_correlation_agg
 
         # Build human-readable summary
         summary: dict = {
