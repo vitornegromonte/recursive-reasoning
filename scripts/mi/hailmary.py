@@ -762,14 +762,19 @@ def plot_logit_attribution(
 def compute_full_W_eff_correlation(
     model: torch.nn.Module,
     x_raw: torch.Tensor,
+    num_cells: int = 81,
     T: int = 42,
 ) -> dict:
     """Compute full W_eff matrix correlation for both linear and gate-corrected variants.
 
-    Linear:  W_eff = W_down @ W_up
-    Gated:   W_eff = W_down @ diag(mean(σ(W_gate @ h))) @ W_up
-             where h is the hidden state entering each block's token mixer,
-             averaged over cells.
+    Strips the puzzle-embedding prefix from weight matrices to obtain a
+    (num_cells, num_cells) effective routing matrix, then computes Pearson
+    correlation against the Sudoku constraint adjacency.
+
+    Linear:  W_eff_grid = W_down_grid @ W_up_grid
+    Gated:   W_eff_grid = W_down_grid @ diag(mean(σ(W_gate_grid @ h_grid))) @ W_up_grid
+             where h_grid is the grid-cell portion of the hidden state entering
+             each block's token mixer.
 
     Returns:
         dict with keys "linear" and "data_driven", each mapping block_0, block_1
@@ -786,11 +791,14 @@ def compute_full_W_eff_correlation(
         gate_up = mixer.gate_up_proj.weight.detach().float()
         down = mixer.down_proj.weight.detach().float()
         inter = gate_up.shape[0] // 2
+        N = gate_up.shape[1]
+        p = N - num_cells
         blocks.append({
             "block_idx": i,
-            "W_gate": gate_up[:inter],  # (inter, N)
-            "W_up": gate_up[inter:],    # (inter, N)
-            "W_down": down,             # (N, inter)
+            "p": p,
+            "W_gate": gate_up[:inter, p:],  # (inter, num_cells) — grid columns only
+            "W_up": gate_up[inter:, p:],    # (inter, num_cells)
+            "W_down": down[p:, :],          # (num_cells, inter) — grid rows only
         })
 
     if not blocks:
@@ -826,10 +834,12 @@ def compute_full_W_eff_correlation(
         bidx = b["block_idx"]
         if bidx not in captured:
             continue
-        h_t = captured[bidx]  # (1, N, N)
-        gate_all = torch.sigmoid(b["W_gate"] @ h_t[0])  # (inter, N)
-        gate_avg = gate_all.mean(dim=1)  # (inter,)
-        W_eff = (b["W_down"] * gate_avg[None, :]) @ b["W_up"]  # (N, N)
+        p = b["p"]
+        h_t = captured[bidx]                          # (1, N, N)
+        h_grid = h_t[0, p:, :]                         # (num_cells, N)
+        gate_all = torch.sigmoid(b["W_gate"] @ h_grid)  # (inter, num_cells)
+        gate_avg = gate_all.mean(dim=1)                # (inter,)
+        W_eff = (b["W_down"] * gate_avg[None, :]) @ b["W_up"]  # (num_cells, num_cells)
         data_corr[f"block_{bidx}"] = analyze_sudoku_correlation(W_eff.cpu().numpy(), adj, type_adjs)
 
     return {"linear": linear_corr, "data_driven": data_corr}
@@ -909,8 +919,9 @@ def run_single(
     # Full W_eff matrix correlation (linear + gate-corrected)
     weight_corr: dict = {}
     if all_inputs:
+        num_cells = config.get("num_cells", 81)
         x_first = all_inputs[0].unsqueeze(0).to(device)
-        weight_corr = compute_full_W_eff_correlation(model, x_first, T=T)
+        weight_corr = compute_full_W_eff_correlation(model, x_first, num_cells=num_cells, T=T)
         if weight_corr:
             for variant in ("linear", "data_driven"):
                 for bk, corr in weight_corr.get(variant, {}).items():

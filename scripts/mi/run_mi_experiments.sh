@@ -70,7 +70,7 @@ run_experiments() {
     )
 
     # Scripts that accept --domain
-    local DOMAIN_SCRIPTS="exp2_dynamics.py|representation_similarity.py|superposition_analysis.py|token_mixer_dissection.py|hailmary.py"
+    local DOMAIN_SCRIPTS="exp2_dynamics.py|representation_similarity.py|superposition_analysis.py|token_mixer_dissection.py"
 
     for entry in "${EXPERIMENTS[@]}"; do
         IFS='|' read -r script exp_label extra_args <<< "$entry"
