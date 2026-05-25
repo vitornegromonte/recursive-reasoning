@@ -136,9 +136,8 @@ def plot_panel_A(ax, concentration):
 
     ax.set_xticks(x)
     ax.set_xticklabels([SIZE_LABELS[s] for s in sizes])
-    ax.set_xlabel("Dataset Scale")
     ax.set_ylabel("$\\Delta$ Accuracy Drop (mean recovery)")
-    ax.legend(loc="upper left", frameon=False)
+    ax.legend(loc="lower left", frameon=False)
     ax.set_title("A - Head Causal Concentration Curve", loc="left", fontsize=11)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -159,13 +158,12 @@ def plot_panel_B(ax, layer_impact):
     l1_s = np.array([layer_impact[s]["l1_std"] for s in sizes])
 
     ax.bar(x - width / 2, l0_m, width, yerr=l0_s, color=DM_NAVY,
-           label="Layer 0", capsize=2, error_kw=dict(elinewidth=0.6))
-    ax.bar(x + width / 2, l1_m, width, yerr=l1_s, color=DM_TEAL,
            label="Layer 1", capsize=2, error_kw=dict(elinewidth=0.6))
+    ax.bar(x + width / 2, l1_m, width, yerr=l1_s, color=DM_TEAL,
+           label="Layer 2", capsize=2, error_kw=dict(elinewidth=0.6))
 
     ax.set_xticks(x)
     ax.set_xticklabels([SIZE_LABELS[s] for s in sizes])
-    ax.set_xlabel("Dataset Scale")
     ax.set_ylabel("$\\Delta$ Accuracy Drop (mean recovery)")
     ax.legend(loc="upper left", frameon=False)
     ax.set_title("B - Layer-wise Circuit Vulnerability", loc="left", fontsize=11)
@@ -211,6 +209,8 @@ def main():
 
     plot_panel_A(axA, concentration)
     plot_panel_B(axB, layer_impact)
+
+    fig.supxlabel("Dataset Scale", fontsize=11, color=DM_GREY_M)
 
     fig.savefig(OUT / "attention_geometry.pdf")
     fig.savefig(OUT / "attention_geometry.png", dpi=300)

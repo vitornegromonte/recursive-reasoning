@@ -759,6 +759,138 @@ def plot_logit_attribution(
     save_figure(fig, f"logit_attribution_puzzle{puzzle_idx}", output_dir)
 
 
+def _uniform_routing_matrix(num_cells: int) -> np.ndarray:
+    """Build a fully uniform routing matrix of shape (num_cells, num_cells)."""
+    return np.full((num_cells, num_cells), 1.0 / num_cells, dtype=np.float32)
+
+
+def compute_linearization_relative_error(
+    model: torch.nn.Module,
+    device: torch.device,
+    num_samples: int = 1000,
+    T: int = 42,
+) -> dict:
+    """Measure ||Y_real - Y_lin|| / ||Y_real|| for the token mixer over examples.
+
+    The comparison uses the same gate-averaged effective linearization already
+    used elsewhere in this script, but evaluates it against the token mixer
+    module output on a stream of test examples.
+    """
+    blocks = []
+    for block_idx, layer in enumerate(model.trm_net.layers):
+        mixer = getattr(layer, "token_mixer", None)
+        if mixer is None or not hasattr(mixer, "gate_up_proj"):
+            continue
+
+        gate_up = mixer.gate_up_proj.weight.detach().float()
+        down = mixer.down_proj.weight.detach().float()
+        intermediate = gate_up.shape[0] // 2
+        blocks.append({
+            "block_idx": block_idx,
+            "W_gate": gate_up[:intermediate],
+            "W_up": gate_up[intermediate:],
+            "W_down": down,
+        })
+
+    if not blocks:
+        return {}
+
+    captured_inputs: dict[int, torch.Tensor] = {}
+    captured_outputs: dict[int, torch.Tensor] = {}
+    handles = []
+
+    def _make_pre_hook(bidx: int):
+        def _hook(mod, inp):
+            captured_inputs[bidx] = inp[0].detach().float()
+        return _hook
+
+    def _make_fwd_hook(bidx: int):
+        def _hook(mod, inp, out):
+            captured_outputs[bidx] = out.detach().float()
+        return _hook
+
+    for b in blocks:
+        layer = model.trm_net.layers[b["block_idx"]].token_mixer
+        handles.append(layer.register_forward_pre_hook(_make_pre_hook(b["block_idx"])))
+        handles.append(layer.register_forward_hook(_make_fwd_hook(b["block_idx"])))
+
+    dataloader = get_test_dataloader(num_samples=num_samples, batch_size=32)
+    model.eval()
+
+    overall_sum = 0.0
+    overall_sq_sum = 0.0
+    overall_count = 0
+    per_block = {
+        b["block_idx"]: {"sum": 0.0, "sq_sum": 0.0, "count": 0}
+        for b in blocks
+    }
+
+    try:
+        with torch.no_grad():
+            for x_batch, _ in dataloader:
+                x_batch = x_batch.to(device)
+                captured_inputs.clear()
+                captured_outputs.clear()
+                _ = model(x_batch, T=T)
+
+                for b in blocks:
+                    bidx = b["block_idx"]
+                    h_t = captured_inputs.get(bidx)
+                    y_real = captured_outputs.get(bidx)
+                    if h_t is None or y_real is None:
+                        continue
+
+                    W_gate = b["W_gate"].to(device)
+                    W_up = b["W_up"].to(device)
+                    W_down = b["W_down"].to(device)
+
+                    gate_avg = torch.sigmoid(h_t @ W_gate.T).mean(dim=1)  # (B, intermediate)
+                    batch_size = h_t.shape[0]
+                    W_eff = torch.bmm(
+                        W_down.unsqueeze(0).expand(batch_size, -1, -1) * gate_avg.unsqueeze(1),
+                        W_up.unsqueeze(0).expand(batch_size, -1, -1),
+                    )  # (B, seq, seq)
+                    y_lin = torch.einsum("bij,bhj->bhi", W_eff, h_t)
+
+                    rel = torch.linalg.norm(y_real - y_lin, dim=(1, 2)) / (
+                        torch.linalg.norm(y_real, dim=(1, 2)) + 1e-12
+                    )
+                    rel_np = rel.detach().float().cpu().numpy()
+                    block_stats = per_block[bidx]
+                    block_stats["sum"] += float(rel_np.sum())
+                    block_stats["sq_sum"] += float(np.square(rel_np).sum())
+                    block_stats["count"] += int(rel_np.size)
+
+                    overall_sum += float(rel_np.sum())
+                    overall_sq_sum += float(np.square(rel_np).sum())
+                    overall_count += int(rel_np.size)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    block_results = {}
+    for bidx, stats in per_block.items():
+        if stats["count"] == 0:
+            continue
+        mean = stats["sum"] / stats["count"]
+        var = max(stats["sq_sum"] / stats["count"] - mean**2, 0.0)
+        block_results[f"block_{bidx}"] = {
+            "mean_relative_error": float(mean),
+            "std_relative_error": float(np.sqrt(var)),
+            "n_examples": int(stats["count"]),
+        }
+
+    overall_mean = overall_sum / overall_count if overall_count else 0.0
+    overall_var = max(overall_sq_sum / overall_count - overall_mean**2, 0.0) if overall_count else 0.0
+
+    return {
+        "mean_relative_error": float(overall_mean),
+        "std_relative_error": float(np.sqrt(overall_var)),
+        "n_examples": int(overall_count),
+        "blocks": block_results,
+    }
+
+
 def compute_full_W_eff_correlation(
     model: torch.nn.Module,
     x_raw: torch.Tensor,
@@ -777,8 +909,9 @@ def compute_full_W_eff_correlation(
              each block's token mixer.
 
     Returns:
-        dict with keys "linear" and "data_driven", each mapping block_0, block_1
-        to per-block correlation dicts from analyze_sudoku_correlation.
+        dict with keys "linear", "data_driven", and "uniform", each mapping
+        block_0, block_1 to per-block correlation dicts from
+        analyze_sudoku_correlation.
     """
     adj = get_constraint_adjacency(9)
     type_adjs = get_constraint_type_adjacency(9)
@@ -806,9 +939,13 @@ def compute_full_W_eff_correlation(
 
     # Linear approximation
     linear_corr: dict[str, dict] = {}
+    uniform_corr: dict[str, dict] = {}
     for b in blocks:
         W_eff = (b["W_down"] @ b["W_up"]).cpu().numpy()
         linear_corr[f"block_{b['block_idx']}"] = analyze_sudoku_correlation(W_eff, adj, type_adjs)
+        uniform_corr[f"block_{b['block_idx']}"] = analyze_sudoku_correlation(
+            _uniform_routing_matrix(W_eff.shape[0]), adj, type_adjs
+        )
 
     # Gate-corrected: capture pre-token-mixer hidden states
     captured: dict[int, torch.Tensor] = {}
@@ -842,7 +979,7 @@ def compute_full_W_eff_correlation(
         W_eff = (b["W_down"] * gate_avg[None, :]) @ b["W_up"]   # (num_cells, num_cells)
         data_corr[f"block_{bidx}"] = analyze_sudoku_correlation(W_eff.cpu().numpy(), adj, type_adjs)
 
-    return {"linear": linear_corr, "data_driven": data_corr}
+    return {"linear": linear_corr, "data_driven": data_corr, "uniform": uniform_corr}
 
 
 def run_single(
@@ -923,7 +1060,7 @@ def run_single(
         x_first = all_inputs[0].unsqueeze(0).to(device)
         weight_corr = compute_full_W_eff_correlation(model, x_first, num_cells=num_cells, T=T)
         if weight_corr:
-            for variant in ("linear", "data_driven"):
+            for variant in ("linear", "data_driven", "uniform"):
                 for bk, corr in weight_corr.get(variant, {}).items():
                     logger.info(
                         "  W_eff [%s/%s]: pearson_overall=%.4f, pearson_row=%.4f, "
@@ -931,6 +1068,27 @@ def run_single(
                         variant, bk, corr["pearson_overall"],
                         corr["pearson_row"], corr["pearson_col"], corr["pearson_box"],
                     )
+
+    linearization_error: dict = {}
+    if all_inputs:
+        linearization_error = compute_linearization_relative_error(
+            model, device, num_samples=1000, T=T
+        )
+        if linearization_error:
+            logger.info(
+                "  Linearization error: mean_relative_error=%.4f ± %.4f (n=%d)",
+                linearization_error["mean_relative_error"],
+                linearization_error["std_relative_error"],
+                linearization_error["n_examples"],
+            )
+            for bname, stats in linearization_error.get("blocks", {}).items():
+                logger.info(
+                    "    %s: mean_relative_error=%.4f ± %.4f (n=%d)",
+                    bname,
+                    stats["mean_relative_error"],
+                    stats["std_relative_error"],
+                    stats["n_examples"],
+                )
 
     # Circuit extraction (per-checkpoint plots)
     if output_dir:
@@ -1009,6 +1167,7 @@ def run_single(
             "aggregate_stats": aggregate_stats,
             "ablation": ablation_results,
             "weight_correlation": weight_corr,
+            "linearization_error": linearization_error,
         }
         if output_dir and circuit_results:
             all_results["circuit_examples"] = [
@@ -1043,6 +1202,7 @@ def run_single(
         "ablation": ablation_results,
         "circuit_data": circuit_data,
         "weight_correlation": weight_corr,
+        "linearization_error": linearization_error,
     }
 
 
@@ -1402,6 +1562,18 @@ def main() -> None:
         if weight_correlation_agg.get("linear", {}).get("block_0"):
             global_summary["weight_correlation"] = weight_correlation_agg
 
+        error_vals = [
+            r["linearization_error"]["mean_relative_error"]
+            for r in all_results
+            if r.get("linearization_error")
+        ]
+        if error_vals:
+            global_summary["linearization_error"] = {
+                "mean_relative_error": float(np.mean(error_vals)),
+                "std_relative_error": float(np.std(error_vals)),
+                "values": error_vals,
+            }
+
         # Build human-readable summary
         summary: dict = {
             "num_checkpoints": len(all_results),
@@ -1412,6 +1584,14 @@ def main() -> None:
                 global_summary["aggregate_stats"]["std_peer_ratio"], 2
             ),
         }
+
+        if "linearization_error" in global_summary:
+            summary["mean_relative_error"] = round(
+                global_summary["linearization_error"]["mean_relative_error"], 4
+            )
+            summary["std_relative_error"] = round(
+                global_summary["linearization_error"]["std_relative_error"], 4
+            )
 
         # Ablation comparison
         ablation_summary = {}
@@ -1438,7 +1618,8 @@ def main() -> None:
                     f"vs clean={clean_acc:.3f}). Gate-corrected signed "
                     f"peer/nonpeer ratio = "
                     f"{summary['mean_peer_nonpeer_ratio']:.2f} ± "
-                    f"{summary['std_peer_nonpeer_ratio']:.2f}"
+                    f"{summary['std_peer_nonpeer_ratio']:.2f}; "
+                    f"mean relative error = {summary.get('mean_relative_error', 0.0):.4f}"
                 )
 
         global_summary["summary"] = summary

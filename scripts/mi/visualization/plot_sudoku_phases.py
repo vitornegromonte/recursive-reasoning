@@ -1,10 +1,10 @@
-"""Figure: AI2 / Allen Institute Institutional style fork.
+"""Figure: OpenAI Corporate Minimalism style fork.
 
   A - Representational  (CKA trajectory + late stability)
   B - Structural        (SwiGLU Layer 0 vs Layer 1 alignment)
   C - Causal            (channel-mixer ablation drop)
 
-Palette: corporate deep blue (#2F5496), technical teal (#00A896), slate blue (#8FAADC)
+Palette: jet black (#111827), emerald (#10B981), slate (#64748B)
 """
 
 import json
@@ -22,17 +22,14 @@ OUT.mkdir(parents=True, exist_ok=True)
 SIZE_ORDER = ["n1k", "n5k", "n10k"]
 SIZE_LABELS = {"n1k": "1K", "n5k": "5K", "n10k": "10K"}
 
-LINE_MAIN = "#2F5496"
-LINE_SEC = "#00A896"
-BAR_COLOR = "#8FAADC"
-AXIS_TEXT = "#333333"
+LINE_MAIN = "#111827"
+LINE_SEC = "#10B981"
+BAR_COLOR = "#111827"
+AXIS_TEXT = "#64748B"
 BG_COLOR = "#FFFFFF"
-GRID_COLOR = "#F2F2F2"
+GRID_COLOR = "#F1F5F9"
 
-SCATTER_ALPHA = 0.35
-
-LINE_MAIN_LIGHT = "#8BA8D0"
-LINE_SEC_LIGHT = "#66CBBF"
+SCATTER_ALPHA = 0.25
 
 
 def iter_seeds(domain, exp):
@@ -68,12 +65,12 @@ def panel_A(ax):
     late_m = np.array([np.mean(late_raw[s]) for s in sizes])
     late_s = np.array([np.std(late_raw[s]) for s in sizes])
 
-    ax.errorbar(x, late_m, yerr=late_s, fmt="o-", color=LINE_MAIN,
-                capsize=1.5, capthick=0.5, linewidth=1.5, markersize=5,
-                label="Late stability")
-    ax.errorbar(x, cka_m, yerr=cka_s, fmt="s--", color=LINE_SEC,
-                capsize=1.5, capthick=0.5, linewidth=1.5, markersize=5,
-                label="CKA(t\u2080, t\u2099)")
+    ax.errorbar(x, late_m, yerr=late_s, fmt="s-", color=LINE_MAIN,
+                capsize=2, capthick=0.5, linewidth=1.5, markersize=5,
+                markeredgewidth=0, label="Late stability")
+    ax.errorbar(x, cka_m, yerr=cka_s, fmt="o--", color=LINE_SEC,
+                capsize=2, capthick=0.5, linewidth=1.5, markersize=5,
+                markeredgewidth=0, label="CKA(t\u2080, t\u2099)")
 
     ax.legend(loc="lower left", frameon=False)
     ax.set_xticks(x)
@@ -109,40 +106,41 @@ def load_panel_B_data():
 def panel_B(ax):
     lin_b0, lin_b1, dd_b0, dd_b1 = load_panel_B_data()
 
-    sizes = [s for s in SIZE_ORDER if dd_b0[s]]
+    use_dd = any(dd_b0[s] for s in SIZE_ORDER)
+    sizes = [s for s in SIZE_ORDER if (dd_b0[s] if use_dd else lin_b0[s])]
     if not sizes:
         sizes = [s for s in SIZE_ORDER if lin_b0[s]]
     x = np.arange(len(sizes))
     jitter = 0.04
 
-    # ── Data-driven (primary): solid lines with error bars ──
-    dd_b0_m = np.array([np.mean(dd_b0[s]) for s in sizes])
-    dd_b1_m = np.array([np.mean(dd_b1[s]) for s in sizes])
-    dd_b0_s = np.array([np.std(dd_b0[s]) for s in sizes])
-    dd_b1_s = np.array([np.std(dd_b1[s]) for s in sizes])
+    # ── Primary lines ──
+    prim_b0 = dd_b0 if use_dd else lin_b0
+    prim_b1 = dd_b1 if use_dd else lin_b1
 
-    ax.errorbar(x, dd_b0_m, yerr=dd_b0_s, fmt="o-", color=LINE_MAIN,
-                linewidth=1.5, markersize=6, capsize=0, elinewidth=0.5,
-                label="Layer 0")
-    ax.errorbar(x, dd_b1_m, yerr=dd_b1_s, fmt="s-", color=LINE_SEC,
-                linewidth=1.5, markersize=6, capsize=0, elinewidth=0.5,
-                label="Layer 1")
+    prim_b0_m = np.array([np.mean(prim_b0[s]) for s in sizes])
+    prim_b1_m = np.array([np.mean(prim_b1[s]) for s in sizes])
 
-    # ── Static (secondary): unfilled markers, no connecting lines ──
-    for si, sz in enumerate(sizes):
-        if sz not in lin_b0 or not lin_b0[sz]:
-            continue
-        for v in lin_b0[sz]:
-            ax.plot(x[si] + np.random.uniform(-jitter, jitter), v, "o",
-                    color=LINE_MAIN, markersize=4, alpha=0.35,
-                    markerfacecolor="none", markeredgewidth=0.6)
-        for v in lin_b1[sz]:
-            ax.plot(x[si] + np.random.uniform(-jitter, jitter), v, "s",
-                    color=LINE_SEC, markersize=4, alpha=0.35,
-                    markerfacecolor="none", markeredgewidth=0.6)
+    ax.plot(x, prim_b0_m, "s-", color=LINE_MAIN,
+            linewidth=1.5, markersize=6, markeredgewidth=0, label="Layer 1")
+    ax.plot(x, prim_b1_m, "o-", color=LINE_SEC,
+            linewidth=1.5, markersize=6, markeredgewidth=0, label="Layer 2")
+
+    # ── Static (secondary): unfilled markers, only when contrast exists ──
+    if use_dd:
+        for si, sz in enumerate(sizes):
+            if sz not in lin_b0 or not lin_b0[sz]:
+                continue
+            for v in lin_b0[sz]:
+                ax.plot(x[si] + np.random.uniform(-jitter, jitter), v, "s",
+                        color=LINE_MAIN, markersize=4, alpha=0.35,
+                        markerfacecolor="none", markeredgewidth=0.6)
+            for v in lin_b1[sz]:
+                ax.plot(x[si] + np.random.uniform(-jitter, jitter), v, "o",
+                        color=LINE_SEC, markersize=4, alpha=0.35,
+                        markerfacecolor="none", markeredgewidth=0.6)
 
     ax.legend(loc="lower left", frameon=False)
-    ax.axhline(y=0, color=GRID_COLOR, linewidth=0.5)
+    ax.axhline(y=0, color="#94A3B8", linewidth=0.6)
     ax.set_ylim(-1.0, 1.0)
     ax.set_xticks(x)
     ax.set_xticklabels([SIZE_LABELS[s] for s in sizes])
@@ -164,7 +162,7 @@ def panel_C(ax):
 
     ax.bar(x, means, width=0.40, color=BAR_COLOR, edgecolor="none")
     ax.errorbar(x, means, yerr=stds, fmt="none",
-                ecolor=AXIS_TEXT, elinewidth=0.8, capsize=1.5)
+                ecolor=AXIS_TEXT, elinewidth=0.8, capsize=2)
 
     ax.set_xticks(x)
     ax.set_xticklabels([SIZE_LABELS[s] for s in sizes])
@@ -178,12 +176,12 @@ def main():
         "savefig.dpi": 300,
         "savefig.bbox": "tight",
         "font.family": "sans-serif",
-        "font.sans-serif": ["Calibri", "Arial", "Segoe UI"],
+        "font.sans-serif": ["Inter", "SF Pro Display", "Helvetica"],
         "font.size": 10,
         "axes.titlesize": 12,
         "axes.labelsize": 11,
         "axes.labelcolor": AXIS_TEXT,
-        "axes.edgecolor": "#7F7F7F",
+        "axes.edgecolor": AXIS_TEXT,
         "axes.linewidth": 0.8,
         "xtick.color": AXIS_TEXT,
         "ytick.color": AXIS_TEXT,
@@ -191,12 +189,12 @@ def main():
         "text.color": AXIS_TEXT,
         "figure.titlesize": 14,
         "lines.linewidth": 1.5,
-        "errorbar.capsize": 1.5,
+        "errorbar.capsize": 2,
         "axes.grid": False,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.spines.left": True,
-        "axes.spines.bottom": True,
+        "axes.spines.left": False,
+        "axes.spines.bottom": False,
         "xtick.major.width": 0.8,
         "ytick.major.width": 0.8,
         "xtick.major.size": 4,
@@ -222,10 +220,8 @@ def main():
         ax.set_facecolor(BG_COLOR)
         ax.grid(axis="y", color=GRID_COLOR, linewidth=0.5, alpha=1.0)
         ax.set_axisbelow(True)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-
-    panel_A(axA)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
 
     panel_A(axA)
     panel_B(axB)
@@ -234,10 +230,10 @@ def main():
     axA.set_xlabel("")
     axC.set_xlabel("")
 
-    fig.savefig(OUT / "Figure_ai2.pdf")
-    fig.savefig(OUT / "Figure_ai2.png")
+    fig.savefig(OUT / "Figure_openai.pdf")
+    fig.savefig(OUT / "Figure_openai.png")
     plt.close(fig)
-    print(f"Saved Figure_ai2.pdf / .png  ({OUT})")
+    print(f"Saved Figure_openai.pdf / .png  ({OUT})")
 
 
 if __name__ == "__main__":
