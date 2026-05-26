@@ -1,10 +1,14 @@
 """Compare uniform routing baseline vs zeroing ablation across exp8 checkpoints.
 
 Reads circuit_analysis.json from exp8, compares:
-  - weight_correlation.uniform.block_N.pearson_overall  (uniform null model)
-  - weight_correlation.data_driven.block_N.pearson_overall (actual routed)
-  - weight_correlation.linear.block_N.pearson_overall  (static weights)
-  - ablation.*_drop  (zeroing ablation effects)
+  - weight_correlation.uniform.block_N.mean_row_deviation
+      (how far actual W_eff deviates from uniform 1/N — high = structured routing)
+  - weight_correlation.data_driven.block_N.pearson_overall
+      (gate-corrected routing vs sudoku constraints)
+  - weight_correlation.linear.block_N.pearson_overall
+      (static weight routing vs sudoku constraints)
+  - ablation.*_drop
+      (zeroing ablation effects)
 
 Prints per-size statistics and saves a comparison figure.
 """
@@ -39,7 +43,6 @@ def collect():
         wc = data.get("weight_correlation", {})
         abl = data.get("ablation", {})
 
-        # Size tag from dir name
         sz = next((s for s in SIZE_TAGS if d.name.startswith(s)), "unknown")
 
         def get_pearson(wc_dict, variant, block):
@@ -48,11 +51,17 @@ def collect():
                 return None
             return val
 
+        def get_field(wc_dict, variant, block, field):
+            val = wc_dict.get(variant, {}).get(block, {}).get(field, None)
+            if val is not None and (isinstance(val, float) and not np.isfinite(val)):
+                return None
+            return val
+
         rows.append({
             "checkpoint": d.name,
             "size": sz,
-            "uniform_b0": get_pearson(wc, "uniform", "block_0"),
-            "uniform_b1": get_pearson(wc, "uniform", "block_1"),
+            "uniform_dev_b0": get_field(wc, "uniform", "block_0", "mean_row_deviation"),
+            "uniform_dev_b1": get_field(wc, "uniform", "block_1", "mean_row_deviation"),
             "data_b0": get_pearson(wc, "data_driven", "block_0"),
             "data_b1": get_pearson(wc, "data_driven", "block_1"),
             "linear_b0": get_pearson(wc, "linear", "block_0"),
@@ -62,26 +71,21 @@ def collect():
             "tok_out_drop": abl.get("token_mixer_outgoing_drop", None),
             "chan_drop": abl.get("channel_mixer_drop", None),
             "both_drop": abl.get("both_drop", None),
+            "uniform_drop": abl.get("uniform_routing_drop", None),
         })
     return rows
 
 
 def print_stats(rows):
-    has_wc = any(r.get("uniform_b0") is not None for r in rows)
+    has_wc = any(r.get("uniform_dev_b0") is not None for r in rows)
 
     print(f"\n{'='*70}")
-    print(f"  exp8 comparison: uniform vs data-driven vs linear (pearson r)")
-    print(f"  Zeroing ablation: accuracy drops")
+    print(f"  exp8: uniform routing deviation vs constraint correlation vs ablation")
     print(f"{'='*70}\n")
 
     if not has_wc:
         print("  NOTE: weight_correlation data not present in these checkpoints.")
-        print("  Run updated hailmary.py first to regenerate exp8 with 'uniform' baseline.\n")
-    else:
-        any_uniform = any(r.get("uniform_b0") is not None and r["size"] in SIZE_TAGS for r in rows)
-        if not any_uniform:
-            print("  NOTE: uniform baseline yields NaN (constant matrix → zero variance → Pearson r undefined).")
-            print("  This is expected: a uniform routing matrix has no variance.\n")
+        print("  Run updated mixer_circuit_discovery.py first.\n")
 
     for sz in SIZE_TAGS:
         subset = [r for r in rows if r["size"] == sz]
@@ -89,16 +93,24 @@ def print_stats(rows):
             continue
         print(f"── {sz.upper()} ({len(subset)} checkpoints) ──")
 
+        print(f"  {'Routing vs Uniform 1/N':22s}")
+        v0 = [r["uniform_dev_b0"] for r in subset if r["uniform_dev_b0"] is not None]
+        v1 = [r["uniform_dev_b1"] for r in subset if r["uniform_dev_b1"] is not None]
+        if v0:
+            print(f"    Layer1: μ={np.mean(v0):.6f} σ={np.std(v0):.6f}")
+            print(f"    Layer2: μ={np.mean(v1):.6f} σ={np.std(v1):.6f}")
+        else:
+            print(f"    (no data)")
+
         for label, key_b0, key_b1 in [
-            ("Uniform  (null)",    "uniform_b0", "uniform_b1"),
-            ("Data-driven (gated)", "data_b0",   "data_b1"),
-            ("Linear  (static)",   "linear_b0",  "linear_b1"),
+            ("Constraint corr (gated)", "data_b0", "data_b1"),
+            ("Constraint corr (static)", "linear_b0", "linear_b1"),
         ]:
             v0 = [r[key_b0] for r in subset if r[key_b0] is not None]
             v1 = [r[key_b1] for r in subset if r[key_b1] is not None]
             if v0:
-                print(f"  {label:22s}  Layer1: μ={np.mean(v0):.4f} σ={np.std(v0):.4f}  "
-                      f"Layer2: μ={np.mean(v1):.4f} σ={np.std(v1):.4f}")
+                print(f"  {label:22s}  Layer1: μ={np.mean(v0):.4f} σ={np.std(v0):.4f}"
+                      f"  Layer2: μ={np.mean(v1):.4f} σ={np.std(v1):.4f}")
             else:
                 print(f"  {label:22s}  (no data)")
 
@@ -108,6 +120,7 @@ def print_stats(rows):
             ("-Token Out ↓", "tok_out_drop"),
             ("-Channel ↓",   "chan_drop"),
             ("-Both ↓",      "both_drop"),
+            ("-Uniform ↓",   "uniform_drop"),
         ]:
             vals = [r[key] for r in subset if r[key] is not None]
             if vals:
@@ -124,129 +137,143 @@ def plot_comparison(rows):
     fig.patch.set_facecolor("#FFFFFF")
 
     colors = {"n1k": "#94A3B8", "n5k": "#10B981", "n10k": "#111827"}
-    blocks = [("block_0", "Layer 1"), ("block_1", "Layer 2")]
+    markers = {"uniform_dev": "s", "data_driven": "o", "linear": "^",
+               "-Token In": "v", "-Token Out": "^", "-Channel": "s", "-Both": "D"}
 
-    for bidx, (bk, blabel) in enumerate(blocks):
-        ax = axes[0, bidx]
-        for variant, vlabel, marker in [
-            ("uniform",     "Uniform (null)",     "s"),
-            ("data_driven", "Data-driven (gated)", "o"),
-            ("linear",      "Linear (static)",    "^"),
-        ]:
-            for sz in SIZE_TAGS:
-                subset = [r for r in rows if r["size"] == sz]
-                vals = [r[f"{variant[:4]}_{bk[-1]}"] for r in subset
-                        if r.get(f"{variant[:4]}_{bk[-1]}") is not None]
-                if not vals:
-                    continue
-                ax.scatter([sz] * len(vals), vals, marker=marker,
-                           color=colors[sz], alpha=0.5, s=30,
-                           label=f"{vlabel}" if sz == "n1k" else "",
-                           zorder=3 if variant != "uniform" else 1)
-                ax.scatter([], [], marker=marker, color=colors[sz],
-                           label=f"{sz}-{vlabel}" if bidx == 0 else "",
-                           alpha=0.7, s=30)
+    # Panel A: mean deviation from uniform (routing structure)
+    ax = axes[0, 0]
+    for sz in SIZE_TAGS:
+        subset = [r for r in rows if r["size"] == sz]
+        for r in subset:
+            if r["uniform_dev_b0"] is not None:
+                ax.scatter(sz, r["uniform_dev_b0"], marker="o",
+                           color=colors[sz], alpha=0.5, s=35)
+            if r["uniform_dev_b1"] is not None:
+                ax.scatter(sz, r["uniform_dev_b1"], marker="s",
+                           color=colors[sz], alpha=0.5, s=35)
+    ax.set_xticks(range(len(SIZE_TAGS)))
+    ax.set_xticklabels(["1K", "5K", "10K"])
+    ax.set_title("A — Routing: mean |W_eff − 1/N|", fontsize=11, color="#334155", loc="left")
+    ax.set_ylabel("Mean row deviation from uniform")
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.grid(axis="y", color="#F1F5F9", linewidth=0.5)
 
-        ax.axhline(y=0, color="#CBD5E1", linewidth=0.5, zorder=0)
-        ax.set_title(f"Pearson r — {blabel}", fontsize=12, color="#334155")
-        ax.set_ylabel("Pearson r")
-        ax.set_xticks(range(len(SIZE_TAGS)))
-        ax.set_xticklabels(["1K", "5K", "10K"])
-        for sp in ax.spines.values():
-            sp.set_visible(False)
-        ax.grid(axis="y", color="#F1F5F9", linewidth=0.5)
+    # Panel B: pearson r vs constraint adjacency
+    ax = axes[0, 1]
+    for variant, vlabel, mk in [("data_driven", "Data-driven", "o"), ("linear", "Linear", "^")]:
+        for sz in SIZE_TAGS:
+            subset = [r for r in rows if r["size"] == sz]
+            v0 = [r[f"{'data' if variant == 'data_driven' else 'linear'}_b0"]
+                  for r in subset if r.get(f"{'data' if variant == 'data_driven' else 'linear'}_b0") is not None]
+            v1 = [r[f"{'data' if variant == 'data_driven' else 'linear'}_b1"]
+                  for r in subset if r.get(f"{'data' if variant == 'data_driven' else 'linear'}_b1") is not None]
+            if v0:
+                ax.scatter([sz] * len(v0), v0, marker=mk, color=colors[sz],
+                           alpha=0.5, s=30, label=f"{vlabel} L1" if sz == "n1k" else "")
+            if v1:
+                ax.scatter([sz] * len(v1), v1, marker=mk, color=colors[sz],
+                           alpha=0.3, s=30, label=f"{vlabel} L2" if sz == "n1k" else "")
+    ax.axhline(y=0, color="#CBD5E1", linewidth=0.5)
+    ax.set_xticks(range(len(SIZE_TAGS)))
+    ax.set_xticklabels(["1K", "5K", "10K"])
+    ax.set_title("B — Constraint adjacency: Pearson r", fontsize=11, color="#334155", loc="left")
+    ax.set_ylabel("Pearson r")
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.grid(axis="y", color="#F1F5F9", linewidth=0.5)
+    ax.legend(fontsize=7, frameon=False)
 
-    # Ablation drops
+    # Panel C: ablation drops
     ax = axes[0, 2]
     for sz in SIZE_TAGS:
         subset = [r for r in rows if r["size"] == sz]
         drops = {"-Token In": [r["tok_in_drop"] for r in subset if r["tok_in_drop"] is not None],
                  "-Token Out": [r["tok_out_drop"] for r in subset if r["tok_out_drop"] is not None],
                  "-Channel": [r["chan_drop"] for r in subset if r["chan_drop"] is not None],
-                 "-Both": [r["both_drop"] for r in subset if r["both_drop"] is not None]}
+                 "-Both": [r["both_drop"] for r in subset if r["both_drop"] is not None],
+                 "-Uniform": [r["uniform_drop"] for r in subset if r["uniform_drop"] is not None]}
         xpos = list(range(len(drops)))
         for xi, (dk, dv) in enumerate(drops.items()):
             if dv:
                 off = {"n1k": -0.2, "n5k": 0, "n10k": 0.2}[sz]
                 ax.scatter([xi + off] * len(dv), dv, color=colors[sz],
-                           alpha=0.5, s=30, label=sz if xi == 0 else "",
-                           zorder=3)
-    ax.axhline(y=0, color="#CBD5E1", linewidth=0.5, zorder=0)
-    ax.set_title("Ablation: accuracy drop (zeroing)", fontsize=12, color="#334155")
+                           alpha=0.5, s=30, label=sz if xi == 0 else "")
+    ax.axhline(y=0, color="#CBD5E1", linewidth=0.5)
+    ax.set_title("C — Zeroing ablation: accuracy drops", fontsize=11, color="#334155", loc="left")
     ax.set_ylabel("Accuracy drop")
-    ax.set_xticks(range(4))
-    ax.set_xticklabels(["-Tok In", "-Tok Out", "-Chan", "-Both"])
+    ax.set_xticks(range(5))
+    ax.set_xticklabels(["-Tok In", "-Tok Out", "-Chan", "-Both", "-Unif"])
     for sp in ax.spines.values():
         sp.set_visible(False)
     ax.grid(axis="y", color="#F1F5F9", linewidth=0.5)
 
-    # Per-size summary bar: mean pearson by variant
+    # Panel D: uniform deviation vs constraint correlation (scatter)
     ax = axes[1, 0]
-    variants = [("uniform", "Uniform"), ("linear", "Linear"), ("data_driven", "Data-driven")]
-    width = 0.2
-    for vi, (vk, vl) in enumerate(variants):
-        for si, sz in enumerate(SIZE_TAGS):
-            subset = [r for r in rows if r["size"] == sz]
-            v0 = [r[f"{vk[:4]}_b0"] for r in subset if r.get(f"{vk[:4]}_b0") is not None]
-            v1 = [r[f"{vk[:4]}_b1"] for r in subset if r.get(f"{vk[:4]}_b1") is not None]
-            m0 = np.mean(v0) if v0 else 0
-            m1 = np.mean(v1) if v1 else 0
-            x = si + vi * width
-            ax.bar(x, m0, width, color=colors[sz], alpha=0.5, label=f"{vl} L1" if si == 0 else "")
-            ax.bar(x + width / 3, m1, width, color=colors[sz], alpha=0.9, label=f"{vl} L2" if si == 0 else "")
-    for sp in ax.spines.values():
-        sp.set_visible(False)
-    ax.grid(axis="y", color="#F1F5F9", linewidth=0.5)
-    ax.set_xticks([s + width for s in range(3)])
-    ax.set_xticklabels(["1K", "5K", "10K"])
-    ax.set_title("Mean Pearson r by variant", fontsize=12, color="#334155")
-    ax.set_ylabel("Pearson r")
-
-    # Ablation summary bar
-    ax = axes[1, 1]
-    for si, sz in enumerate(SIZE_TAGS):
-        subset = [r for r in rows if r["size"] == sz]
-        drops = {"Tok In": [r["tok_in_drop"] for r in subset if r["tok_in_drop"] is not None],
-                 "Tok Out": [r["tok_out_drop"] for r in subset if r["tok_out_drop"] is not None],
-                 "Chan": [r["chan_drop"] for r in subset if r["chan_drop"] is not None],
-                 "Both": [r["both_drop"] for r in subset if r["both_drop"] is not None]}
-        xpos = np.arange(len(drops)) + si * 5
-        for xi, (dk, dv) in enumerate(drops.items()):
-            m = np.mean(dv) if dv else 0
-            s = np.std(dv) if dv else 0
-            ax.bar(xpos[xi], m, 0.8, color=colors[sz], alpha=0.7,
-                   yerr=s, capsize=2, label=sz if xi == 0 else "")
-    for sp in ax.spines.values():
-        sp.set_visible(False)
-    ax.grid(axis="y", color="#F1F5F9", linewidth=0.5)
-    ax.set_xticks(np.arange(4) + 5)
-    ax.set_xticklabels(["Tok In", "Tok Out", "Chan", "Both"])
-    ax.set_title("Zeroing ablation drops (mean±std)", fontsize=12, color="#334155")
-    ax.set_ylabel("Accuracy drop")
-
-    # Scatter: uniform vs data-driven per checkpoint
-    ax = axes[1, 2]
     for sz in SIZE_TAGS:
         subset = [r for r in rows if r["size"] == sz]
         for r in subset:
-            if r["uniform_b0"] is not None and r["data_b0"] is not None:
-                ax.scatter(r["uniform_b0"], r["data_b0"], marker="o",
+            if r["uniform_dev_b0"] is not None and r["data_b0"] is not None:
+                ax.scatter(r["uniform_dev_b0"], r["data_b0"], marker="o",
                            color=colors[sz], alpha=0.6, s=40, label=sz)
-            if r["uniform_b1"] is not None and r["data_b1"] is not None:
-                ax.scatter(r["uniform_b1"], r["data_b1"], marker="s",
+            if r["uniform_dev_b1"] is not None and r["data_b1"] is not None:
+                ax.scatter(r["uniform_dev_b1"], r["data_b1"], marker="s",
                            color=colors[sz], alpha=0.4, s=40)
-    ax.plot([-0.1, 0.1], [-0.1, 0.1], "--", color="#CBD5E1", linewidth=0.8)
     ax.axhline(y=0, color="#CBD5E1", linewidth=0.4)
-    ax.axvline(x=0, color="#CBD5E1", linewidth=0.4)
     for sp in ax.spines.values():
         sp.set_visible(False)
     ax.grid(True, color="#F1F5F9", linewidth=0.5)
-    ax.set_xlabel("Uniform pearson r")
-    ax.set_ylabel("Data-driven pearson r")
-    ax.set_title("Uniform vs Data-driven (per checkpoint)", fontsize=12, color="#334155")
-    ax.set_aspect("equal")
+    ax.set_xlabel("Mean |W_eff − 1/N| (uniform deviation)")
+    ax.set_ylabel("Pearson r (data-driven)")
+    ax.set_title("D — Routing structure vs constraint alignment", fontsize=11, color="#334155", loc="left")
 
-    fig.suptitle("exp8: Uniform baseline vs Zeroing ablation", fontsize=14, y=1.01)
+    # Panel E: uniform deviation vs ablation drop
+    ax = axes[1, 1]
+    for sz in SIZE_TAGS:
+        subset = [r for r in rows if r["size"] == sz]
+        for r in subset:
+            if r["uniform_dev_b0"] is not None and r["chan_drop"] is not None:
+                ax.scatter(r["uniform_dev_b0"], r["chan_drop"], marker="o",
+                           color=colors[sz], alpha=0.6, s=40, label=sz)
+            if r["uniform_dev_b1"] is not None and r["chan_drop"] is not None:
+                ax.scatter(r["uniform_dev_b1"], r["chan_drop"], marker="s",
+                           color=colors[sz], alpha=0.4, s=40,
+                           label="Layer 2" if sz == "n1k" else "")
+    ax.axhline(y=0, color="#CBD5E1", linewidth=0.4)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.grid(True, color="#F1F5F9", linewidth=0.5)
+    ax.set_xlabel("Mean |W_eff − 1/N| (uniform deviation)")
+    ax.set_ylabel("-Channel accuracy drop")
+    ax.set_title("E — Routing structure vs channel ablation", fontsize=11, color="#334155", loc="left")
+
+    # Panel F: summary bar — all three metrics by size
+    ax = axes[1, 2]
+    width = 0.25
+    for si, sz in enumerate(SIZE_TAGS):
+        subset = [r for r in rows if r["size"] == sz]
+        dev0 = [r["uniform_dev_b0"] for r in subset if r["uniform_dev_b0"] is not None]
+        dev1 = [r["uniform_dev_b1"] for r in subset if r["uniform_dev_b1"] is not None]
+        chan = [r["chan_drop"] for r in subset if r["chan_drop"] is not None]
+        data0 = [r["data_b0"] for r in subset if r["data_b0"] is not None]
+        # Scale deviation and channel drop for shared y-axis
+        m_dev = np.mean(dev0 + dev1) if (dev0 or dev1) else 0
+        m_chan = np.mean(chan) if chan else 0
+        m_data = np.mean(data0) if data0 else 0
+        x = si * 4
+        ax.bar(x, m_dev, width, color=colors[sz], alpha=0.6, label=f"{sz} dev" if si == 0 else "")
+        ax.bar(x + width, m_chan, width, color=colors[sz], alpha=0.9, label=f"{sz} -Chan" if si == 0 else "")
+        ax.bar(x + 2 * width, m_data, width, color=colors[sz], alpha=0.3, label=f"{sz} Pears" if si == 0 else "")
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.grid(axis="y", color="#F1F5F9", linewidth=0.5)
+    ax.set_xticks(np.arange(3) * 4 + width)
+    ax.set_xticklabels(["1K", "5K", "10K"])
+    ax.set_title("F — Summary (mean)", fontsize=11, color="#334155", loc="left")
+    ax.legend(fontsize=7, frameon=False)
+
+    fig.suptitle("exp8: Uniform routing deviation vs Constraint alignment vs Zeroing ablation",
+                 fontsize=13, y=1.01)
     fig.savefig(OUT / "exp8_uniform_vs_zeroing.png", dpi=200, bbox_inches="tight")
     fig.savefig(OUT / "exp8_uniform_vs_zeroing.pdf", bbox_inches="tight")
     plt.close(fig)

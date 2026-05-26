@@ -261,6 +261,7 @@ def ablation_study(
     targets: torch.Tensor,
     device: torch.device,
     T: int = 42,
+    num_cells: int = 81,
 ) -> dict:
     """
     Run component-level ablation on the TRM circuit.
@@ -270,6 +271,7 @@ def ablation_study(
     2. Zero out full token-mixer for target cell (all incoming)
     3. Zero out channel-mixer for target cell
     4. Combined: token + channel mixer
+    5. Uniform routing: replace W_eff row with 1/N — output = mean of all grid inputs
 
     Args:
         model: TRM model.
@@ -278,6 +280,7 @@ def ablation_study(
         targets: Ground truth (batch, 81).
         device: Compute device.
         T: Recursion steps.
+        num_cells: Number of Sudoku grid cells.
 
     Returns:
         Dict with per-ablation accuracy results.
@@ -378,6 +381,48 @@ def ablation_study(
     abl4_acc = float((abl4_preds[:, list(target_set)] == targets[:, list(target_set)]).float().mean().item())
     results["ablate_both"] = abl4_acc
     results["both_drop"] = clean_acc - abl4_acc
+
+    # Uniform routing: replace each target cell's W_eff row with 1/N
+    # → output = mean of all grid-cell inputs
+    captured_inputs: list[torch.Tensor] = []
+
+    def _make_uniform_pre_hook(grid_offset):
+        def _hook(mod, inp):
+            h = inp[0].detach()
+            grid = h[:, :, grid_offset:]
+            captured_inputs.append(grid.mean(dim=-1, keepdim=True))
+        return _hook
+
+    def _make_uniform_fwd_hook(tc_set):
+        def _hook(mod, _inp, out):
+            avg = captured_inputs.pop(0)
+            for tc in tc_set:
+                out[:, :, tc] = avg.squeeze(-1)
+            return out
+        return _hook
+
+    handles = []
+    seq_len = model.trm_net.layers[0].token_mixer.gate_up_proj.in_features
+    grid_offset = seq_len - num_cells
+    for layer in model.trm_net.layers:
+        handles.append(
+            layer.token_mixer.register_forward_pre_hook(
+                _make_uniform_pre_hook(grid_offset)
+            )
+        )
+        handles.append(
+            layer.token_mixer.register_forward_hook(
+                _make_uniform_fwd_hook(set(target_cells))
+            )
+        )
+    captured_inputs.clear()
+    abl5_logits = model(x_raw, T=T)
+    for h in handles:
+        h.remove()
+    abl5_preds = abl5_logits.argmax(dim=-1)
+    abl5_acc = float((abl5_preds[:, list(set(target_cells))] == targets[:, list(set(target_cells))]).float().mean().item())
+    results["ablate_uniform_routing"] = abl5_acc
+    results["uniform_routing_drop"] = clean_acc - abl5_acc
 
     # Final restore
     for i, layer in enumerate(model.trm_net.layers):
@@ -695,6 +740,7 @@ def plot_ablation_results(
         ("-Token Out", ablation_results["ablate_token_mixer_outgoing"]),
         ("-Channel", ablation_results["ablate_channel_mixer"]),
         ("-Both", ablation_results["ablate_both"]),
+        ("-Uniform", ablation_results["ablate_uniform_routing"]),
     ]
 
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -757,11 +803,6 @@ def plot_logit_attribution(
     )
     fig.tight_layout()
     save_figure(fig, f"logit_attribution_puzzle{puzzle_idx}", output_dir)
-
-
-def _uniform_routing_matrix(num_cells: int) -> np.ndarray:
-    """Build a fully uniform routing matrix of shape (num_cells, num_cells)."""
-    return np.full((num_cells, num_cells), 1.0 / num_cells, dtype=np.float32)
 
 
 def compute_linearization_relative_error(
@@ -943,9 +984,16 @@ def compute_full_W_eff_correlation(
     for b in blocks:
         W_eff = (b["W_down"] @ b["W_up"]).cpu().numpy()
         linear_corr[f"block_{b['block_idx']}"] = analyze_sudoku_correlation(W_eff, adj, type_adjs)
-        uniform_corr[f"block_{b['block_idx']}"] = analyze_sudoku_correlation(
-            _uniform_routing_matrix(W_eff.shape[0]), adj, type_adjs
-        )
+        Nc = W_eff.shape[0]
+        uniform_val = 1.0 / Nc
+        row_devs = np.abs(W_eff - uniform_val).mean(axis=1)  # mean deviation per row
+        uniform_corr[f"block_{b['block_idx']}"] = {
+            "uniform_val": uniform_val,
+            "mean_row_deviation": float(row_devs.mean()),
+            "std_row_deviation": float(row_devs.std()),
+            "max_row_deviation": float(row_devs.max()),
+            "min_row_deviation": float(row_devs.min()),
+        }
 
     # Gate-corrected: capture pre-token-mixer hidden states
     captured: dict[int, torch.Tensor] = {}
@@ -1147,7 +1195,7 @@ def run_single(
     y_batch = torch.stack([all_targets[i] for i in puzzle_indices]).to(device)
 
     ablation_results = ablation_study(
-        model, x_batch, target_cells, y_batch, device, T=T,
+        model, x_batch, target_cells, y_batch, device, T=T, num_cells=num_cells,
     )
 
     # Channel-mixer attribution (per-checkpoint only)
@@ -1221,8 +1269,9 @@ def plot_global_ablation(
         "ablate_token_mixer_outgoing",
         "ablate_channel_mixer",
         "ablate_both",
+        "ablate_uniform_routing",
     ]
-    labels = ["Clean", "-Token In", "-Token Out", "-Channel", "-Both"]
+    labels = ["Clean", "-Token In", "-Token Out", "-Channel", "-Both", "-Uniform"]
 
     means = []
     stds = []
@@ -1232,7 +1281,7 @@ def plot_global_ablation(
         stds.append(np.std(vals) if vals else 0)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    colors_list = [COLORS["correct"]] + [COLORS["incorrect"]] * 4
+    colors_list = [COLORS["correct"]] + [COLORS["incorrect"]] * 4 + [COLORS["trm"]]
     bars = ax.bar(labels, means, yerr=stds, color=colors_list, alpha=0.8,
                   edgecolor="white", capsize=5)
 
@@ -1297,8 +1346,9 @@ def plot_per_dataset_ablation(
         "ablate_token_mixer_outgoing",
         "ablate_channel_mixer",
         "ablate_both",
+        "ablate_uniform_routing",
     ]
-    labels = ["Clean", "-Token In", "-Token Out", "-Channel", "-Both"]
+    labels = ["Clean", "-Token In", "-Token Out", "-Channel", "-Both", "-Uniform"]
 
     means = []
     stds = []
@@ -1308,7 +1358,7 @@ def plot_per_dataset_ablation(
         stds.append(np.std(vals) if vals else 0)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    colors_list = [COLORS["correct"]] + [COLORS["incorrect"]] * 4
+    colors_list = [COLORS["correct"]] + [COLORS["incorrect"]] * 5
     bars = ax.bar(labels, means, yerr=stds, color=colors_list, alpha=0.8,
                   edgecolor="white", capsize=5)
 
@@ -1412,6 +1462,7 @@ def plot_global_circuit_summary(
         ("ablate_token_mixer_outgoing", "-Token Out"),
         ("ablate_channel_mixer", "-Channel"),
         ("ablate_both", "-Both"),
+        ("ablate_uniform_routing", "-Uniform"),
     ]
     abl_means = []
     abl_stds = []
@@ -1527,6 +1578,7 @@ def main() -> None:
         ablation_keys = [
             "clean_acc_on_targets", "ablate_token_mixer_incoming",
             "ablate_token_mixer_outgoing", "ablate_channel_mixer", "ablate_both",
+            "ablate_uniform_routing",
         ]
         for key in ablation_keys:
             vals = [r["ablation"][key] for r in all_results if key in r["ablation"]]
@@ -1561,6 +1613,25 @@ def main() -> None:
                         }
         if weight_correlation_agg.get("linear", {}).get("block_0"):
             global_summary["weight_correlation"] = weight_correlation_agg
+
+        # Aggregate uniform deviation stats
+        uniform_agg: dict[str, dict] = {}
+        for bk in wcorr_blocks:
+            devs = [
+                r["weight_correlation"]["uniform"][bk]["mean_row_deviation"]
+                for r in all_results
+                if r.get("weight_correlation", {}).get("uniform", {}).get(bk)
+            ]
+            if devs:
+                uniform_agg[bk] = {
+                    "mean_row_deviation": {
+                        "mean": float(np.mean(devs)),
+                        "std": float(np.std(devs)),
+                        "values": devs,
+                    }
+                }
+        if uniform_agg:
+            global_summary.setdefault("weight_correlation", {})["uniform"] = uniform_agg
 
         error_vals = [
             r["linearization_error"]["mean_relative_error"]
