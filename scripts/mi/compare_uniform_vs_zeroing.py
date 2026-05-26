@@ -43,7 +43,10 @@ def collect():
         sz = next((s for s in SIZE_TAGS if d.name.startswith(s)), "unknown")
 
         def get_pearson(wc_dict, variant, block):
-            return wc_dict.get(variant, {}).get(block, {}).get("pearson_overall", None)
+            val = wc_dict.get(variant, {}).get(block, {}).get("pearson_overall", None)
+            if val is not None and (isinstance(val, float) and not np.isfinite(val)):
+                return None
+            return val
 
         rows.append({
             "checkpoint": d.name,
@@ -74,6 +77,11 @@ def print_stats(rows):
     if not has_wc:
         print("  NOTE: weight_correlation data not present in these checkpoints.")
         print("  Run updated hailmary.py first to regenerate exp8 with 'uniform' baseline.\n")
+    else:
+        any_uniform = any(r.get("uniform_b0") is not None and r["size"] in SIZE_TAGS for r in rows)
+        if not any_uniform:
+            print("  NOTE: uniform baseline yields NaN (constant matrix → zero variance → Pearson r undefined).")
+            print("  This is expected: a uniform routing matrix has no variance.\n")
 
     for sz in SIZE_TAGS:
         subset = [r for r in rows if r["size"] == sz]
