@@ -1110,12 +1110,22 @@ def run_single(
         if weight_corr:
             for variant in ("linear", "data_driven", "uniform"):
                 for bk, corr in weight_corr.get(variant, {}).items():
-                    logger.info(
-                        "  W_eff [%s/%s]: pearson_overall=%.4f, pearson_row=%.4f, "
-                        "pearson_col=%.4f, pearson_box=%.4f",
-                        variant, bk, corr["pearson_overall"],
-                        corr["pearson_row"], corr["pearson_col"], corr["pearson_box"],
-                    )
+                    if variant == "uniform":
+                        logger.info(
+                            "  W_eff [%s/%s]: mean_row_deviation=%.6f, "
+                            "std_row_deviation=%.6f, max_row_deviation=%.6f",
+                            variant, bk,
+                            corr.get("mean_row_deviation", float("nan")),
+                            corr.get("std_row_deviation", float("nan")),
+                            corr.get("max_row_deviation", float("nan")),
+                        )
+                    else:
+                        logger.info(
+                            "  W_eff [%s/%s]: pearson_overall=%.4f, pearson_row=%.4f, "
+                            "pearson_col=%.4f, pearson_box=%.4f",
+                            variant, bk, corr["pearson_overall"],
+                            corr["pearson_row"], corr["pearson_col"], corr["pearson_box"],
+                        )
 
     linearization_error: dict = {}
     if all_inputs:
