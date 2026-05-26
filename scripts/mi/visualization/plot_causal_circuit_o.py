@@ -1,7 +1,7 @@
 """Figure: Causal Circuit Analysis — 1×2 layout. OpenAI style.
 
-Panel A: Clean accuracy baseline vs ablated (channel-mixer removed) accuracy.
-Panel B: Pathway decomposition — incoming vs outgoing token-mixer drops.
+Panel A: Normal vs ablated accuracy across training scale.
+Panel B: Routing deviation (mean_row_deviation from uniform 1/N).
 """
 
 from pathlib import Path
@@ -21,35 +21,61 @@ SIZE_LABELS = ["1K", "5K", "10K"]
 N_SEEDS = 3
 
 LINE_MAIN = "#111827"
-LINE_SEC = "#10B981"
+LINE_TEAL = "#14B8A6"
+LINE_CORAL = "#E76F51"
 AXIS_TEXT = "#64748B"
 BG_COLOR = "#FFFFFF"
 GRID_COLOR = "#F1F5F9"
 
 
-def load_metrics():
+def load_accuracies():
     clean = {tag: [] for tag in SIZE_TAGS}
-    cm_drop = {tag: [] for tag in SIZE_TAGS}
-    in_drop = {tag: [] for tag in SIZE_TAGS}
-    out_drop = {tag: [] for tag in SIZE_TAGS}
+    zeroed = {tag: [] for tag in SIZE_TAGS}
+    uniform = {tag: [] for tag in SIZE_TAGS}
 
     for tag in SIZE_TAGS:
         for seed in range(N_SEEDS):
             f = ROOT / "sudoku" / "exp8" / f"{tag}_seed{seed}" / "circuit_analysis.json"
-            d = json.load(open(f))
+            if not f.exists():
+                continue
+            with open(f) as fh:
+                d = json.load(fh)
             abl = d["ablation"]
             clean[tag].append(abl["clean_acc_on_targets"])
-            cm_drop[tag].append(abl["channel_mixer_drop"])
-            in_drop[tag].append(abl["token_mixer_incoming_drop"])
-            out_drop[tag].append(abl["token_mixer_outgoing_drop"])
+            zeroed[tag].append(abl["ablate_channel_mixer"])
+            uniform[tag].append(abl.get("ablate_uniform_routing", abl["clean_acc_on_targets"]))
 
     def stats(d):
         m = np.array([float(np.mean(d[t])) for t in SIZE_TAGS])
         s = np.array([float(np.std(d[t])) for t in SIZE_TAGS])
         return m, s
 
-    return (stats(clean), stats(cm_drop),
-            stats(in_drop), stats(out_drop))
+    return stats(clean), stats(zeroed), stats(uniform)
+
+
+def load_deviation():
+    devs_b0 = {tag: [] for tag in SIZE_TAGS}
+    devs_b1 = {tag: [] for tag in SIZE_TAGS}
+
+    for tag in SIZE_TAGS:
+        for seed in range(N_SEEDS):
+            f = ROOT / "sudoku" / "exp8" / f"{tag}_seed{seed}" / "circuit_analysis.json"
+            if not f.exists():
+                continue
+            with open(f) as fh:
+                d = json.load(fh)
+            wc = d.get("weight_correlation", {})
+            u = wc.get("uniform", {})
+            b0 = u.get("block_0", {}).get("mean_row_deviation", None)
+            b1 = u.get("block_1", {}).get("mean_row_deviation", None)
+            if b0 is not None:
+                devs_b0[tag].append(b0)
+            if b1 is not None:
+                devs_b1[tag].append(b1)
+
+    m0 = np.array([float(np.mean(devs_b0[t])) if devs_b0[t] else 0 for t in SIZE_TAGS])
+    m1 = np.array([float(np.mean(devs_b1[t])) if devs_b1[t] else 0 for t in SIZE_TAGS])
+    return m0, m1
 
 
 def main():
@@ -67,33 +93,32 @@ def main():
         "axes.grid": False,
     })
 
-    cl_m, cl_s = load_metrics()[0]
-    cm_m, cm_s = load_metrics()[1]
-    in_m, in_s = load_metrics()[2]
-    out_m, out_s = load_metrics()[3]
-
-    ablated_m = cl_m - cm_m
-    ablated_s = np.sqrt(cl_s**2 + cm_s**2)
-
+    (cl_m, cl_s), (zr_m, zr_s), (un_m, un_s) = load_accuracies()
+    dev0, dev1 = load_deviation()
     x = np.arange(len(SIZE_TAGS))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.5))
     fig.patch.set_facecolor(BG_COLOR)
 
-    # ── Panel A: Ablation Impact with Baseline ──
+    # ── Panel A: Accuracy trajectories ──
     ax1.set_facecolor(BG_COLOR)
     ax1.plot(x, cl_m, color=LINE_MAIN, marker="s", linewidth=1.8,
-             markersize=7, markeredgewidth=0, label="Clean accuracy")
+             markersize=7, markeredgewidth=0, label="Clean")
     ax1.fill_between(x, cl_m - cl_s, cl_m + cl_s,
                      color=LINE_MAIN, alpha=0.10)
-    ax1.plot(x, ablated_m, color=LINE_SEC, marker="o", linewidth=1.8,
+    ax1.plot(x, zr_m, color=LINE_TEAL, marker="o", linewidth=1.8,
              markersize=7, markeredgewidth=0, linestyle="--",
-             label="Ablated (channel-mixer removed)")
-    ax1.fill_between(x, ablated_m - ablated_s, ablated_m + ablated_s,
-                     color=LINE_SEC, alpha=0.10)
+             label="Zeroing (routing removed)")
+    ax1.fill_between(x, zr_m - zr_s, zr_m + zr_s,
+                     color=LINE_TEAL, alpha=0.10)
+    ax1.plot(x, un_m, color=LINE_CORAL, marker="D", linewidth=1.8,
+             markersize=7, markeredgewidth=0, linestyle="-.",
+             label="Uniform (1/N routing)")
+    ax1.fill_between(x, un_m - un_s, un_m + un_s,
+                     color=LINE_CORAL, alpha=0.10)
 
     ax1.set_ylabel("Accuracy", fontsize=11)
-    ax1.set_title("A - Ablation Impact", loc="left", fontsize=12)
+    ax1.set_title("A - Ablation Comparison", loc="left", fontsize=12)
     ax1.legend(loc="lower left", frameon=False, fontsize=9)
     ax1.set_xticks(x)
     ax1.set_xticklabels(SIZE_LABELS)
@@ -101,27 +126,17 @@ def main():
     ax1.set_axisbelow(True)
     for spine in ax1.spines.values():
         spine.set_visible(False)
-    ax1.set_ylim(0, 0.8)
 
-    # ── Panel B: Pathway Decomposition ──
+    # ── Panel B: Routing deviation ──
     ax2.set_facecolor(BG_COLOR)
-    ax2.plot(x, cm_m, color=LINE_MAIN, marker="s", linewidth=1.8,
-             markersize=7, markeredgewidth=0, label="Channel-mixer")
-    ax2.fill_between(x, cm_m - cm_s, cm_m + cm_s,
-                     color=LINE_MAIN, alpha=0.10)
-    ax2.plot(x, in_m, color=LINE_SEC, marker="^", linewidth=1.8,
+    ax2.plot(x, dev0, color=LINE_MAIN, marker="s", linewidth=1.8,
+             markersize=7, markeredgewidth=0, label="Layer 1")
+    ax2.plot(x, dev1, color=LINE_TEAL, marker="^", linewidth=1.8,
              markersize=7, markeredgewidth=0, linestyle="--",
-             label="Token-mixer (incoming)")
-    ax2.fill_between(x, in_m - in_s, in_m + in_s,
-                     color=LINE_SEC, alpha=0.10)
-    ax2.plot(x, out_m, color=AXIS_TEXT, marker="v", linewidth=1.8,
-             markersize=7, markeredgewidth=0, linestyle=":",
-             label="Token-mixer (outgoing)")
-    ax2.fill_between(x, out_m - out_s, out_m + out_s,
-                     color=AXIS_TEXT, alpha=0.10)
+             label="Layer 2")
 
-    ax2.set_ylabel("$\\Delta$ Accuracy Drop", fontsize=11)
-    ax2.set_title("B - Pathway Decomposition", loc="left", fontsize=12)
+    ax2.set_ylabel("Mean $|W_{eff} - 1/N|$", fontsize=11)
+    ax2.set_title("B - Routing Structure", loc="left", fontsize=12)
     ax2.legend(loc="upper left", frameon=False, fontsize=9)
     ax2.set_xticks(x)
     ax2.set_xticklabels(SIZE_LABELS)
@@ -130,7 +145,6 @@ def main():
     for spine in ax2.spines.values():
         spine.set_visible(False)
 
-    # Shared x-axis
     fig.supxlabel("Training Scale ($D$)", fontsize=11, color=AXIS_TEXT)
 
     fname = "Figure_causal_circuit_openai"

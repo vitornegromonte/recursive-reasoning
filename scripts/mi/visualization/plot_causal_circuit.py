@@ -1,7 +1,12 @@
-"""Figure: Causal Circuit Analysis — dual-axis plot.
+"""Figure: Causal Circuit Analysis — 1×2 layout.
 
-Left axis: channel-mixer ablation impact (Δ Accuracy pp).
-Right axis: non-peer vs peer pathway causal ratio.
+Panel A: Normal vs ablated accuracy across training scale.
+  - Clean: no intervention
+  - Zeroing: channel-mixer output zeroed (routing removed)
+  - Uniform: W_eff replaced with 1/N (routing = equal average)
+
+Panel B: Routing deviation — how far learned W_eff rows deviate from
+  uniform 1/N. Higher = more structured routing.
 """
 
 from pathlib import Path
@@ -20,29 +25,68 @@ SIZE_TAGS = ["n1k", "n5k", "n10k"]
 SIZE_LABELS = ["1K", "5K", "10K"]
 N_SEEDS = 3
 
+COLORS = ["#001F3F", "#00A896", "#E76F51"]
+LABELS = ["Clean", "Zeroing (routing removed)", "Uniform (1/N routing)"]
+MARKERS = ["s", "o", "D"]
+LINES = ["-", "--", "-."]
+
 DM_TEAL = "#00A896"
 DM_NAVY = "#001F3F"
+DM_CORAL = "#E76F51"
+AXIS_CLR = "#333333"
 
 
-def load_metrics():
-    primary = {tag: [] for tag in SIZE_TAGS}
-    secondary = {tag: [] for tag in SIZE_TAGS}
+def load_accuracies():
+    clean = {tag: [] for tag in SIZE_TAGS}
+    zeroed = {tag: [] for tag in SIZE_TAGS}
+    uniform = {tag: [] for tag in SIZE_TAGS}
 
     for tag in SIZE_TAGS:
         for seed in range(N_SEEDS):
             f = ROOT / "sudoku" / "exp8" / f"{tag}_seed{seed}" / "circuit_analysis.json"
-            d = json.load(open(f))
+            if not f.exists():
+                continue
+            with open(f) as fh:
+                d = json.load(fh)
             abl = d["ablation"]
-            primary[tag].append(abl["channel_mixer_drop"] * 100)
-            nonpeer = abl["channel_mixer_drop"]
-            peer = (abl["token_mixer_incoming_drop"] + abl["token_mixer_outgoing_drop"]) / 2
-            secondary[tag].append(nonpeer / peer if peer > 0 else 0.0)
+            clean[tag].append(abl["clean_acc_on_targets"])
+            zeroed[tag].append(abl["ablate_channel_mixer"])
+            uniform[tag].append(abl.get("ablate_uniform_routing", abl["clean_acc_on_targets"]))
 
-    p_means = np.array([float(np.mean(primary[t])) for t in SIZE_TAGS])
-    p_stds = np.array([float(np.std(primary[t])) for t in SIZE_TAGS])
-    s_means = np.array([float(np.mean(secondary[t])) for t in SIZE_TAGS])
-    s_stds = np.array([float(np.std(secondary[t])) for t in SIZE_TAGS])
-    return p_means, p_stds, s_means, s_stds
+    def stats(d):
+        m = np.array([float(np.mean(d[t])) for t in SIZE_TAGS])
+        s = np.array([float(np.std(d[t])) for t in SIZE_TAGS])
+        return m, s
+
+    return stats(clean), stats(zeroed), stats(uniform)
+
+
+def load_deviation():
+    """Load mean_row_deviation from weight_correlation.uniform (per block).
+    Structural property — same across seeds, grab from first seed found.
+    """
+    devs_b0 = {tag: [] for tag in SIZE_TAGS}
+    devs_b1 = {tag: [] for tag in SIZE_TAGS}
+
+    for tag in SIZE_TAGS:
+        for seed in range(N_SEEDS):
+            f = ROOT / "sudoku" / "exp8" / f"{tag}_seed{seed}" / "circuit_analysis.json"
+            if not f.exists():
+                continue
+            with open(f) as fh:
+                d = json.load(fh)
+            wc = d.get("weight_correlation", {})
+            u = wc.get("uniform", {})
+            b0 = u.get("block_0", {}).get("mean_row_deviation", None)
+            b1 = u.get("block_1", {}).get("mean_row_deviation", None)
+            if b0 is not None:
+                devs_b0[tag].append(b0)
+            if b1 is not None:
+                devs_b1[tag].append(b1)
+
+    m0 = np.array([float(np.mean(devs_b0[t])) if devs_b0[t] else 0 for t in SIZE_TAGS])
+    m1 = np.array([float(np.mean(devs_b1[t])) if devs_b1[t] else 0 for t in SIZE_TAGS])
+    return m0, m1
 
 
 def main():
@@ -51,48 +95,53 @@ def main():
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "Helvetica", "Inter"],
         "font.size": 11,
-        "axes.titlesize": 13, "axes.labelsize": 11,
-        "axes.labelcolor": "#333333", "axes.edgecolor": "#333333",
+        "axes.titlesize": 12, "axes.labelsize": 11,
+        "axes.labelcolor": AXIS_CLR, "axes.edgecolor": AXIS_CLR,
         "axes.linewidth": 0.8,
-        "xtick.color": "#333333", "ytick.color": "#333333",
-        "text.color": "#333333", "figure.titlesize": 14,
+        "xtick.color": AXIS_CLR, "ytick.color": AXIS_CLR,
+        "text.color": AXIS_CLR, "figure.titlesize": 14,
     })
 
-    p_means, p_stds, s_means, s_stds = load_metrics()
+    (cl_m, cl_s), (zr_m, zr_s), (un_m, un_s) = load_accuracies()
+    dev0, dev1 = load_deviation()
     x = np.arange(len(SIZE_TAGS))
 
-    fig, ax1 = plt.subplots(figsize=(5.5, 4))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.5))
 
-    # Primary axis (left) — Teal
-    color_primary = DM_TEAL
-    ax1.plot(x, p_means, color=color_primary, marker="s", linewidth=1.8,
-             markersize=7, label="Channel-Mixer Ablation Impact")
-    ax1.fill_between(x, p_means - p_stds, p_means + p_stds,
-                     color=color_primary, alpha=0.15)
-    ax1.set_ylabel("Causal Circuit Ablation Impact ($\\Delta$ Accuracy pp)",
-                   color=color_primary, fontsize=10)
-    ax1.tick_params(axis="y", colors=color_primary)
-    ax1.spines["left"].set_color(color_primary)
+    # ── Panel A: Accuracy trajectories ──
+    for means, stds, color, label, marker, ls in zip(
+        [cl_m, zr_m, un_m],
+        [cl_s, zr_s, un_s],
+        COLORS, LABELS, MARKERS, LINES,
+    ):
+        ax1.plot(x, means, color=color, marker=marker, linestyle=ls,
+                 linewidth=1.8, markersize=7, label=label)
+        ax1.fill_between(x, means - stds, means + stds,
+                         color=color, alpha=0.10)
 
-    # Secondary axis (right) — Navy
-    ax2 = ax1.twinx()
-    color_secondary = DM_NAVY
-    ax2.plot(x, s_means, color=color_secondary, marker="o", linewidth=1.8,
-             markersize=7, label="Non-Peer vs Peer Pathway Ratio")
-    ax2.fill_between(x, s_means - s_stds, s_means + s_stds,
-                     color=color_secondary, alpha=0.15)
-    ax2.set_ylabel("Non-Peer Pathway Causal Reliance (Ratio)",
-                   color=color_secondary, fontsize=10)
-    ax2.tick_params(axis="y", colors=color_secondary)
-    ax2.spines["right"].set_color(color_secondary)
-
-    # Shared x-axis
+    ax1.set_ylabel("Accuracy", fontsize=11)
+    ax1.set_title("A - Ablation Comparison", loc="left", fontsize=12)
+    ax1.legend(loc="lower left", frameon=False, fontsize=9)
     ax1.set_xticks(x)
     ax1.set_xticklabels(SIZE_LABELS)
     ax1.set_xlabel("Training Scale ($D$)", fontsize=11)
-
     ax1.spines["top"].set_visible(False)
+    ax1.spines["right"].set_visible(False)
+
+    # ── Panel B: Routing deviation ──
+    ax2.plot(x, dev0, color=DM_TEAL, marker="s", linewidth=1.8,
+             markersize=7, label="Layer 1")
+    ax2.plot(x, dev1, color=DM_NAVY, marker="^", linewidth=1.8,
+             markersize=7, linestyle="--", label="Layer 2")
+
+    ax2.set_ylabel("Mean $|W_{eff} - 1/N|$ per row", fontsize=11)
+    ax2.set_title("B - Routing Structure", loc="left", fontsize=12)
+    ax2.legend(loc="upper left", frameon=False, fontsize=9)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(SIZE_LABELS)
+    ax2.set_xlabel("Training Scale ($D$)", fontsize=11)
     ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
 
     fname = "Figure_causal_circuit"
     fig.savefig(OUT / f"{fname}.pdf")
