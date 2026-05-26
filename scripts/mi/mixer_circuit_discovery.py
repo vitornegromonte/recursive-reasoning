@@ -402,7 +402,7 @@ def ablation_study(
         return _hook
 
     handles = []
-    seq_len = model.trm_net.layers[0].token_mixer.gate_up_proj.in_features
+    seq_len = model.trm_net.layers[0].token_mixer.gate_up_proj.weight.shape[1]
     grid_offset = seq_len - num_cells
     for layer in model.trm_net.layers:
         handles.append(
