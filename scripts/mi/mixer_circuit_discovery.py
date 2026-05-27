@@ -118,6 +118,107 @@ def find_naked_singles(
     return naked_singles
 
 
+def find_hidden_singles(
+    puzzle: np.ndarray,
+    solution: np.ndarray,
+    grid_size: int = 9,
+) -> list[dict]:
+    """
+    Find cells that are hidden singles in the puzzle.
+
+    A hidden single is a digit that can only go in one specific blank cell
+    within a row, column, or 3x3 box.  Unlike a naked single (where a cell
+    has only one possible digit), a hidden single means the digit itself
+    has only one possible placement within the constraint group.
+
+    Args:
+        puzzle: One-hot encoded puzzle (81, 10). Channel 0 = blank.
+        solution: Target digits (81,), 0-indexed.
+        grid_size: Puzzle dimension.
+
+    Returns:
+        List of dicts with keys: cell_idx, correct_digit, peers,
+        peers_by_type, constraint_type, hidden_digit.
+    """
+    n = grid_size
+    groups = get_constraint_groups(n)
+
+    given: dict[int, int] = {}
+    for c in range(n * n):
+        if puzzle[c, 0] < 0.5:
+            given[c] = int(np.argmax(puzzle[c, 1:]))
+
+    blank_cells = [c for c in range(n * n) if c not in given]
+
+    # Precompute per-cell which digits are eliminated by peers
+    eliminated_by_peer: dict[int, set[int]] = {}
+    for cell in blank_cells:
+        used: set[int] = set()
+        for ctype, group_list in groups.items():
+            for grp in group_list:
+                if cell in grp:
+                    for peer in grp:
+                        if peer in given:
+                            used.add(given[peer])
+        eliminated_by_peer[cell] = used
+
+    hidden_singles: list[dict] = []
+    seen: set[tuple[int, int]] = set()  # (cell_idx, hidden_digit)
+
+    # For each constraint group (row/col/box), check each digit
+    type_order = ["rows", "cols", "boxes"]
+    type_key_map = {"rows": "row", "cols": "col", "boxes": "box"}
+
+    for ctype in type_order:
+        group_list = groups[ctype]
+        ctype_name = type_key_map[ctype]
+
+        for grp_idx, group in enumerate(group_list):
+            given_in_group = {c for c in group if c in given}
+            present_digits = {given[c] for c in given_in_group}
+
+            for d in range(n):
+                if d in present_digits:
+                    continue
+                # Blank cells in this group where d is still possible
+                candidates = [
+                    c for c in group
+                    if c in blank_cells and d not in eliminated_by_peer[c]
+                ]
+                if len(candidates) == 1:
+                    cell = candidates[0]
+                    key = (cell, d)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    correct_digit = int(solution[cell])
+                    # Collect peers for this cell (from ALL constraints)
+                    peer_list: list[int] = []
+                    peers_by_type: dict[str, list[int]] = {"row": [], "col": [], "box": []}
+                    for ct, g_list in groups.items():
+                        ct_name = type_key_map[ct]
+                        for grp in g_list:
+                            if cell in grp:
+                                for peer in grp:
+                                    if peer in given:
+                                        peer_list.append(peer)
+                                        peers_by_type[ct_name].append(peer)
+                    peer_list = sorted(set(peer_list))
+
+                    hidden_singles.append({
+                        "cell_idx": cell,
+                        "correct_digit": correct_digit,
+                        "hidden_digit": d,
+                        "peers": peer_list,
+                        "peers_by_type": {k: sorted(set(v)) for k, v in peers_by_type.items()},
+                        "constraint_type": ctype_name,
+                        "num_constraints": len(present_digits),
+                    })
+
+    return hidden_singles
+
+
 # Token-Mixer Circuit Extraction
 
 def extract_token_mixer_circuit(
@@ -543,6 +644,7 @@ def plot_circuit_diagram(
     naked_single: dict,
     output_dir: str | Path,
     puzzle_idx: int = 0,
+    tag: str = "",
 ) -> None:
     """
     Plot circuit diagram showing token-mixer routing for a naked single.
@@ -595,8 +697,9 @@ def plot_circuit_diagram(
     # Summary panel
     ax = axes[-1]
     ax.axis("off")
+    single_type = tag.capitalize() if tag else "Naked"
     summary = (
-        f"Naked Single Analysis\n"
+        f"{single_type} Single Analysis\n"
         f"{'='*30}\n\n"
         f"Target Cell: {target}\n"
         f"  (row {target//9}, col {target%9})\n\n"
@@ -634,11 +737,12 @@ def plot_circuit_diagram(
             bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
 
     fig.suptitle(
-        f"Circuit Trace: Naked Single at Cell {target} (digit {correct})",
+        f"Circuit Trace: {single_type} Single at Cell {target} (digit {correct})",
         fontsize=14,
     )
     fig.tight_layout()
-    save_figure(fig, f"circuit_diagram_puzzle{puzzle_idx}", output_dir)
+    suffix = f"_{tag}" if tag else ""
+    save_figure(fig, f"circuit_diagram_puzzle{puzzle_idx}{suffix}", output_dir)
 
 
 
@@ -648,6 +752,7 @@ def plot_full_computational_graph(
     attribution: dict,
     output_dir: str | Path,
     puzzle_idx: int = 0,
+    tag: str = "",
 ) -> None:
     """
     Render a proper node-link computational graph of how constraint 
@@ -720,9 +825,11 @@ def plot_full_computational_graph(
     nx.draw(G, pos, ax=ax, with_labels=True, node_color=colors, node_size=sizes, 
             width=weights, edge_color="gray", arrowsize=20, font_size=9, font_weight="bold")
             
-    fig.suptitle(f"Computational Graph: Naked Single Cell {target} -> Digit {correct+1}", fontsize=14)
+    single_type = tag.capitalize() if tag else "Naked"
+    fig.suptitle(f"Computational Graph: {single_type} Single Cell {target} -> Digit {correct+1}", fontsize=14)
     fig.tight_layout()
-    save_figure(fig, f"full_computational_graph_puzzle{puzzle_idx}", output_dir)
+    suffix = f"_{tag}" if tag else ""
+    save_figure(fig, f"full_computational_graph_puzzle{puzzle_idx}{suffix}", output_dir)
 
 
 def plot_ablation_results(
@@ -1036,7 +1143,8 @@ def run_single(
     device: torch.device = None,
     num_samples: int = 200,
     T: int = 42,
-    max_singles: int = 50,
+    max_singles: int = 200,
+    max_hidden_singles: int = 200,
     output_dir: str | Path | None = None,
 ) -> dict:
     """
@@ -1087,6 +1195,21 @@ def run_single(
 
     logger.info("Found %d naked singles across %d puzzles",
                 len(all_naked_singles), len(all_inputs))
+
+    # Find hidden singles
+    all_hidden_singles: list[dict] = []
+    for i in range(len(all_inputs)):
+        puzzle = all_inputs[i].numpy()
+        solution = all_targets[i].numpy()
+        singles = find_hidden_singles(puzzle, solution)
+        for hs in singles:
+            hs["puzzle_idx"] = i
+        all_hidden_singles.extend(singles)
+        if len(all_hidden_singles) >= max_hidden_singles:
+            break
+
+    logger.info("Found %d hidden singles across %d puzzles",
+                len(all_hidden_singles), len(all_inputs))
 
     if not all_naked_singles:
         logger.warning("No naked singles found!")
@@ -1160,7 +1283,18 @@ def run_single(
             attr = channel_mixer_attribution(model, x_single, ns["cell_idx"], ns["correct_digit"], device, T=T)
             plot_full_computational_graph(circuit, ns, attr, output_dir, puzzle_idx=ns["puzzle_idx"])
 
-    # Aggregate circuit statistics (gate-corrected, signed as primary)
+    # Hidden-single circuit extraction (per-checkpoint plots)
+    hidden_circuit_results: list[dict] = []
+    if output_dir:
+        for idx, hs in enumerate(all_hidden_singles[:5]):
+            x_single = all_inputs[hs["puzzle_idx"]].unsqueeze(0).to(device)
+            circuit_h = extract_token_mixer_circuit(model, hs["cell_idx"], hs["peers"], x_raw=x_single, T=T)
+            hidden_circuit_results.append({"hidden_single": hs, "circuit": circuit_h})
+            plot_circuit_diagram(circuit_h, hs, output_dir, puzzle_idx=hs["puzzle_idx"], tag="hidden")
+            attr_h = channel_mixer_attribution(model, x_single, hs["cell_idx"], hs["correct_digit"], device, T=T)
+            plot_full_computational_graph(circuit_h, hs, attr_h, output_dir, puzzle_idx=hs["puzzle_idx"], tag="hidden")
+
+    # --- Naked-single aggregate circuit statistics ---
     peer_ratios_gated = []
     block_W_effs_gated: dict[int, list[np.ndarray]] = {}
     for ns in all_naked_singles:
@@ -1198,7 +1332,44 @@ def run_single(
             "median_peer_nonpeer_ratio": float(np.median(peer_ratios_gated)),
         }
 
-    # Component ablation
+    # --- Hidden-single aggregate circuit statistics ---
+    hidden_peer_ratios_gated: list[float] = []
+    hidden_block_W_effs_gated: dict[int, list[np.ndarray]] = {}
+    for hs in all_hidden_singles:
+        x_single = all_inputs[hs["puzzle_idx"]].unsqueeze(0).to(device)
+        circuit_h = extract_token_mixer_circuit(model, hs["cell_idx"], hs["peers"], x_raw=x_single, T=T)
+        for block in circuit_h:
+            if "mean_peer_weight_gated" not in block:
+                continue
+            ratio = block["mean_peer_weight_gated"] / max(block["mean_nonpeer_weight_gated"], 1e-12)
+            hidden_peer_ratios_gated.append(ratio)
+            bidx = block["block_idx"]
+            hidden_block_W_effs_gated.setdefault(bidx, []).append(
+                np.array(block["W_eff_gated_target_row"])
+            )
+
+    hidden_circuit_data: dict = {}
+    for bidx, rows in hidden_block_W_effs_gated.items():
+        stacked = np.stack(rows)
+        hidden_circuit_data[bidx] = {
+            "mean_W_eff_row": stacked.mean(axis=0).tolist(),
+            "std_W_eff_row": stacked.std(axis=0).tolist(),
+            "mean_peer_weight": float(np.mean([
+                r[p] for r in rows for hs in all_hidden_singles for p in hs["peers"]
+            ])),
+            "n_samples": len(rows),
+        }
+
+    hidden_aggregate_stats: dict = {}
+    if hidden_peer_ratios_gated:
+        hidden_aggregate_stats = {
+            "num_hidden_singles": len(all_hidden_singles),
+            "mean_peer_nonpeer_ratio": float(np.mean(hidden_peer_ratios_gated)),
+            "std_peer_nonpeer_ratio": float(np.std(hidden_peer_ratios_gated)),
+            "median_peer_nonpeer_ratio": float(np.median(hidden_peer_ratios_gated)),
+        }
+
+    # Component ablation (naked)
     target_cells = [ns["cell_idx"] for ns in all_naked_singles[:20]]
     puzzle_indices = list(set(ns["puzzle_idx"] for ns in all_naked_singles[:20]))
     x_batch = torch.stack([all_inputs[i] for i in puzzle_indices]).to(device)
@@ -1206,6 +1377,16 @@ def run_single(
 
     ablation_results = ablation_study(
         model, x_batch, target_cells, y_batch, device, T=T, num_cells=num_cells,
+    )
+
+    # Component ablation (hidden)
+    hidden_target_cells = [hs["cell_idx"] for hs in all_hidden_singles[:20]]
+    hidden_puzzle_indices = list(set(hs["puzzle_idx"] for hs in all_hidden_singles[:20]))
+    hidden_x_batch = torch.stack([all_inputs[i] for i in hidden_puzzle_indices]).to(device)
+    hidden_y_batch = torch.stack([all_targets[i] for i in hidden_puzzle_indices]).to(device)
+
+    hidden_ablation_results = ablation_study(
+        model, hidden_x_batch, hidden_target_cells, hidden_y_batch, device, T=T, num_cells=num_cells,
     )
 
     # Channel-mixer attribution (per-checkpoint only)
@@ -1224,6 +1405,8 @@ def run_single(
         all_results = {
             "aggregate_stats": aggregate_stats,
             "ablation": ablation_results,
+            "hidden_aggregate_stats": hidden_aggregate_stats,
+            "hidden_ablation": hidden_ablation_results,
             "weight_correlation": weight_corr,
             "linearization_error": linearization_error,
         }
@@ -1258,7 +1441,10 @@ def run_single(
     return {
         "aggregate_stats": aggregate_stats,
         "ablation": ablation_results,
+        "hidden_aggregate_stats": hidden_aggregate_stats,
+        "hidden_ablation": hidden_ablation_results,
         "circuit_data": circuit_data,
+        "hidden_circuit_data": hidden_circuit_data,
         "weight_correlation": weight_corr,
         "linearization_error": linearization_error,
     }
@@ -1501,6 +1687,135 @@ def plot_global_circuit_summary(
     save_figure(fig, f"circuit_summary_{tag}", output_dir)
 
 
+# ── Naked vs Hidden comparison plots ──
+
+def plot_naked_vs_hidden_ablation(
+    all_results: list[dict],
+    output_dir: str | Path,
+) -> None:
+    """Grouped bar chart: ablation drops for naked vs hidden side by side."""
+    set_paper_style()
+
+    ablation_keys = [
+        "clean_acc_on_targets",
+        "ablate_token_mixer_incoming",
+        "ablate_token_mixer_outgoing",
+        "ablate_channel_mixer",
+        "ablate_both",
+        "ablate_uniform_routing",
+    ]
+    labels = ["Clean", "-Token In", "-Token Out", "-Channel", "-Both", "-Uniform"]
+
+    naked_means: list[float] = []
+    naked_stds: list[float] = []
+    hidden_means: list[float] = []
+    hidden_stds: list[float] = []
+
+    for key in ablation_keys:
+        n_vals = [r["ablation"][key] for r in all_results if key in r.get("ablation", {})]
+        naked_means.append(float(np.mean(n_vals)) if n_vals else 0)
+        naked_stds.append(float(np.std(n_vals)) if n_vals else 0)
+
+        h_vals = [r["hidden_ablation"][key] for r in all_results if key in r.get("hidden_ablation", {})]
+        hidden_means.append(float(np.mean(h_vals)) if h_vals else 0)
+        hidden_stds.append(float(np.std(h_vals)) if h_vals else 0)
+
+    x = np.arange(len(labels))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars_n = ax.bar(x - width / 2, naked_means, width, yerr=naked_stds,
+                    label="Naked single", color=COLORS["trm"], alpha=0.8,
+                    capsize=3, edgecolor="white")
+    bars_h = ax.bar(x + width / 2, hidden_means, width, yerr=hidden_stds,
+                    label="Hidden single", color=COLORS["critical"], alpha=0.8,
+                    capsize=3, edgecolor="white")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Cell Accuracy")
+    ax.set_title(f"Naked vs Hidden Single Ablation (n={len(all_results)} ckpts)")
+    ax.legend(frameon=False)
+    ax.set_ylim(0, 1.15)
+    for bar in (*bars_n, *bars_h):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.015,
+                f"{bar.get_height():.3f}", ha="center", va="bottom", fontsize=7)
+
+    fig.tight_layout()
+    save_figure(fig, "naked_vs_hidden_ablation", output_dir)
+
+
+def plot_naked_vs_hidden_peer_ratios(
+    all_results: list[dict],
+    output_dir: str | Path,
+) -> None:
+    """Side-by-side boxplots: peer/nonpeer ratio for naked vs hidden."""
+    set_paper_style()
+
+    naked_ratios = [r["aggregate_stats"]["mean_peer_nonpeer_ratio"]
+                    for r in all_results if r.get("aggregate_stats")]
+    hidden_ratios = [r["hidden_aggregate_stats"]["mean_peer_nonpeer_ratio"]
+                     for r in all_results if r.get("hidden_aggregate_stats")]
+
+    if not naked_ratios or not hidden_ratios:
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    bp = ax.boxplot([naked_ratios, hidden_ratios], widths=0.4, patch_artist=True,
+                    tick_labels=["Naked single", "Hidden single"])
+
+    bp["boxes"][0].set_facecolor(COLORS["trm"])
+    bp["boxes"][1].set_facecolor(COLORS["critical"])
+    for elem in ("whiskers", "caps", "medians"):
+        for line in bp[elem]:
+            line.set_color("black")
+
+    ax.set_ylabel("Peer / Non-Peer Weight Ratio")
+    ax.set_title(f"Circuit Routing Specificity: Naked vs Hidden (n={len(all_results)} ckpts)")
+    ax.axhline(1.0, color="gray", linestyle=":", alpha=0.5, label="No preference")
+    ax.legend(frameon=False, fontsize=9)
+
+    fig.tight_layout()
+    save_figure(fig, "naked_vs_hidden_peer_ratios", output_dir)
+
+
+def plot_naked_vs_hidden_circuit_summary(
+    all_results: list[dict],
+    output_dir: str | Path,
+    label: str = "Global",
+) -> None:
+    """Mean W_eff row comparison: naked vs hidden per block."""
+    set_paper_style()
+
+    w_naked: list[float] = []
+    w_hidden: list[float] = []
+    for r in all_results:
+        cd = r.get("circuit_data", {})
+        hcd = r.get("hidden_circuit_data", {})
+        for bidx in sorted(set(cd) | set(hcd)):
+            if bidx in cd:
+                w_naked.append(cd[bidx].get("mean_peer_weight", 0))
+            if bidx in hcd:
+                w_hidden.append(hcd[bidx].get("mean_peer_weight", 0))
+
+    if not w_naked and not w_hidden:
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    x = np.arange(2)
+    ax.bar(x, [np.mean(w_naked) if w_naked else 0, np.mean(w_hidden) if w_hidden else 0],
+           yerr=[np.std(w_naked) if w_naked else 0, np.std(w_hidden) if w_hidden else 0],
+           color=[COLORS["trm"], COLORS["critical"]], alpha=0.8,
+           capsize=5, edgecolor="white", width=0.4,
+           tick_label=["Naked single", "Hidden single"])
+    ax.set_ylabel("Mean Peer Weight")
+    ax.set_title(f"Mean Token-Mixer Peer Weight: Naked vs Hidden ({label})")
+
+    fig.tight_layout()
+    tag = label.lower().replace(" ", "_")
+    save_figure(fig, f"naked_vs_hidden_circuit_summary_{tag}", output_dir)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Circuit Discovery: Naked Single Tracing + Ablation"
@@ -1510,8 +1825,10 @@ def main() -> None:
     group.add_argument("--trm-ckpt-dir", help="Directory of TRM checkpoints")
     parser.add_argument("--num-samples", type=int, default=200)
     parser.add_argument("--T", type=int, default=42)
-    parser.add_argument("--max-singles", type=int, default=50,
-                       help="Max naked singles to analyze")
+    parser.add_argument("--max-singles", type=int, default=200,
+                       help="Max naked singles to analyze (default: 200)")
+    parser.add_argument("--max-hidden-singles", type=int, default=200,
+                       help="Max hidden singles to analyze (default: 200)")
     parser.add_argument("--output-dir", default="outputs/mi/exp8")
     parser.add_argument("--model-type", default="trm_v2", choices=["trm_v2", "original_trm"], help="Model type to load")
     parser.add_argument("--matched-budget", type=int, default=None,
@@ -1527,7 +1844,7 @@ def main() -> None:
             logger.info("Resolved matched checkpoint: %s", ckpt_path)
         result = run_single(
             ckpt_path, args.model_type, device, args.num_samples, args.T,
-            args.max_singles, args.output_dir,
+            args.max_singles, args.max_hidden_singles, args.output_dir,
         )
         logger.info("Done! Results saved to %s", args.output_dir)
         if result["aggregate_stats"]:
@@ -1552,7 +1869,7 @@ def main() -> None:
 
             result = run_single(
                 ckpt["path"], args.model_type, device, args.num_samples, args.T,
-                args.max_singles, str(per_dir),
+                args.max_singles, args.max_hidden_singles, str(per_dir),
             )
             result["run_id"] = run_id
             result["data_size"] = ckpt["data_size"]
@@ -1707,8 +2024,32 @@ def main() -> None:
 
         save_json(global_summary, "global_results", str(global_dir))
 
+        # Aggregate hidden ablation stats
+        for key in ablation_keys:
+            h_vals = [r["hidden_ablation"][key] for r in all_results if key in r.get("hidden_ablation", {})]
+            if h_vals:
+                global_summary.setdefault("hidden_ablation", {})[key] = {
+                    "mean": float(np.mean(h_vals)),
+                    "std": float(np.std(h_vals)),
+                    "values": h_vals,
+                }
+
+        # Hidden peer ratio stats
+        h_ratios = [r["hidden_aggregate_stats"]["mean_peer_nonpeer_ratio"]
+                    for r in all_results if r.get("hidden_aggregate_stats")]
+        if h_ratios:
+            global_summary["hidden_aggregate_stats"] = {
+                "mean_peer_ratio": float(np.mean(h_ratios)),
+                "std_peer_ratio": float(np.std(h_ratios)),
+            }
+
         # Global circuit summary diagram
         plot_global_circuit_summary(all_results, str(global_dir), label="Global")
+
+        # Naked vs Hidden comparison plots
+        plot_naked_vs_hidden_ablation(all_results, str(global_dir))
+        plot_naked_vs_hidden_peer_ratios(all_results, str(global_dir))
+        plot_naked_vs_hidden_circuit_summary(all_results, str(global_dir), label="Global")
 
         # Per-dataset-size plots 
         size_groups: dict[int, list[dict]] = {}
@@ -1731,6 +2072,11 @@ def main() -> None:
             plot_global_circuit_summary(
                 ds_results, str(ds_dir), label=f"{ds_label} dataset",
             )
+            plot_naked_vs_hidden_ablation(ds_results, str(ds_dir))
+            plot_naked_vs_hidden_peer_ratios(ds_results, str(ds_dir))
+            plot_naked_vs_hidden_circuit_summary(
+                ds_results, str(ds_dir), label=f"{ds_label} dataset",
+            )
 
             # Aggregate ablation for this dataset size
             ds_ablation: dict = {}
@@ -1743,15 +2089,32 @@ def main() -> None:
                         "values": vals,
                     }
 
+            ds_hidden_ablation: dict = {}
+            for key in ablation_keys:
+                vals = [r["hidden_ablation"][key] for r in ds_results if key in r.get("hidden_ablation", {})]
+                if vals:
+                    ds_hidden_ablation[key] = {
+                        "mean": float(np.mean(vals)),
+                        "std": float(np.std(vals)),
+                        "values": vals,
+                    }
+
             ds_peer_ratios = [
                 r["aggregate_stats"]["mean_peer_nonpeer_ratio"]
                 for r in ds_results if r["aggregate_stats"]
+            ]
+            ds_hidden_ratios = [
+                r["hidden_aggregate_stats"]["mean_peer_nonpeer_ratio"]
+                for r in ds_results if r.get("hidden_aggregate_stats")
             ]
             per_dsize_summary[ds_label] = {
                 "num_seeds": len(ds_results),
                 "mean_peer_ratio": float(np.mean(ds_peer_ratios)) if ds_peer_ratios else 0,
                 "std_peer_ratio": float(np.std(ds_peer_ratios)) if ds_peer_ratios else 0,
                 "ablation": ds_ablation,
+                "hidden_ablation": ds_hidden_ablation,
+                "mean_hidden_peer_ratio": float(np.mean(ds_hidden_ratios)) if ds_hidden_ratios else 0,
+                "std_hidden_peer_ratio": float(np.std(ds_hidden_ratios)) if ds_hidden_ratios else 0,
             }
             save_json(per_dsize_summary[ds_label], f"results_dsize_{ds_label}", str(ds_dir))
 
